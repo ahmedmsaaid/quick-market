@@ -482,7 +482,7 @@ async function refreshOffers() {
                     featuredPhoto: o.featuredPhoto || '',
                     otherPhotos: Array.isArray(o.otherPhotos) && o.otherPhotos.length > 0 ? o.otherPhotos : (o.featuredPhoto ? [o.featuredPhoto] : []),
                     description: o.description || '',
-                    active: o.active, approved: o.approved,
+                    active: o.active,
                     offerType: o.offerType, type: o.type,
                     numberOfClicks: o.numberOfClicks,
                     numberOfWatches: o.numberOfWatches,
@@ -2455,9 +2455,6 @@ function renderOffersTab(parent) {
             } else {
                 badgeRow.appendChild(ui.createElementWithText('span', t('offer_status_inactive'), ['badge', 'badge-danger']));
             }
-            if (!offer.approved) {
-                badgeRow.appendChild(ui.createElementWithText('span', t('offer_status_pending'), ['badge', 'badge-pending']));
-            }
             card.appendChild(badgeRow);
 
             // Stats row (only rendered if returned by API)
@@ -2712,7 +2709,7 @@ function showAddOfferModal() {
                 const tempOffer = {
                     id: 'temp-' + Date.now(), name, price, description,
                     featuredPhoto: uploadedPhotoKey,
-                    active: activeInput.checked, approved: false,
+                    active: activeInput.checked,
                     offerType: isEditable, type: 1,
                     numberOfClicks: 0, numberOfWatches: 0, numberOfBooking: 0,
                     products: productsWithQty
