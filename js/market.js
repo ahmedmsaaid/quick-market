@@ -5,7 +5,7 @@
  * Type = 1 (Supermarket)
  */
 
-import * as ui from './ui-utils.js?v=2.0';
+import * as ui from './ui-utils.js?v=29.0';
 import { t, getLanguage, setLanguage, initTranslations, subscribeLangChange } from './translations.js';
 import { ApiClient, ImageService, Logger } from './core.js';
 import { initFCMNotificationService } from './fcm-helper.js';
@@ -338,6 +338,7 @@ async function refreshOrders() {
                         name: p.productName || (menuItem ? menuItem.name : 'Item'),
                         qty: p.quantity,
                         price: p.price,
+                        image: (menuItem && (menuItem.image || menuItem.photo)) ? (menuItem.image || menuItem.photo) : (p.photo || p.image || ''),
                         picked: false,
                         productId: p.productId
                     };
@@ -347,6 +348,9 @@ async function refreshOrders() {
                     status: mapBackendStatusToLocal(ord.status),
                     items,
                     totalPrice: ord.totalPrice - (ord.deliveryFee || 0) - (ord.orderFee || 0),
+                    deliveryFee: ord.deliveryFee || 0,
+                    finalTotal: ord.totalPrice,
+                    paymentMethod: ord.paymentMethod || (ord.rawOrder && ord.rawOrder.paymentMethod) || 0,
                     notes: ord.note || ord.notes || '',
                     customerName: ord.user ? ord.user.name : (getLanguage() === 'ar' ? 'عميل' : 'Customer'),
                     customerPhone: ord.user ? ord.user.phone : '',
@@ -1539,7 +1543,7 @@ function renderOrdersTab(parent) {
     // New orders (status=0/1): need accept or decline
     if (newOrders.length > 0) {
         parent.appendChild(ui.createElementWithText('h3', getLanguage() === 'ar' ? '🔔 طلبات جديدة تحتاج قبول' : '🔔 New Orders - Needs Acceptance', [], { style: 'margin-bottom: 1rem; font-size: 1.05rem;' }));
-        const grid0 = ui.createElement('div', ['analytics-grid'], { style: 'margin-bottom: 2rem;' });
+        const grid0 = ui.createElement('div', ['analytics-grid', 'qs-orders-grid'], { style: 'margin-bottom: 2rem;' });
         newOrders.forEach(ord => buildOrderCard(grid0, ord));
         parent.appendChild(grid0);
     }
@@ -1547,7 +1551,7 @@ function renderOrdersTab(parent) {
     // Waiting for driver (status=2): accepted, captain not yet confirmed
     if (waitingOrders.length > 0) {
         parent.appendChild(ui.createElementWithText('h3', getLanguage() === 'ar' ? '⏳ بانتظار تعيين سائق' : '⏳ Awaiting Driver Assignment', [], { style: 'margin-bottom: 1rem; font-size: 1.05rem; color: var(--color-pending);' }));
-        const grid1 = ui.createElement('div', ['analytics-grid'], { style: 'margin-bottom: 2rem;' });
+        const grid1 = ui.createElement('div', ['analytics-grid', 'qs-orders-grid'], { style: 'margin-bottom: 2rem;' });
         waitingOrders.forEach(ord => buildOrderCard(grid1, ord, true));
         parent.appendChild(grid1);
     }
@@ -1555,7 +1559,7 @@ function renderOrdersTab(parent) {
     // Active orders (status=3/4): captain confirmed, market preparing
     if (confirmedOrders.length > 0) {
         parent.appendChild(ui.createElementWithText('h3', getLanguage() === 'ar' ? '🛒 طلبات قيد التجهيز' : '🛒 Active Orders', [], { style: 'margin-bottom: 1rem; font-size: 1.05rem;' }));
-        const grid = ui.createElement('div', ['analytics-grid'], { style: 'margin-bottom: 2rem;' });
+        const grid = ui.createElement('div', ['analytics-grid', 'qs-orders-grid'], { style: 'margin-bottom: 2rem;' });
         confirmedOrders.forEach(ord => buildOrderCard(grid, ord));
         parent.appendChild(grid);
     }
@@ -1563,78 +1567,41 @@ function renderOrdersTab(parent) {
     // Completed orders
     if (completedOrders.length > 0) {
         parent.appendChild(ui.createElementWithText('h3', getLanguage() === 'ar' ? '✅ الطلبات المكتملة' : '✅ Completed Orders', [], { style: 'margin-bottom: 1rem; font-size: 1.05rem; color: var(--color-success);' }));
-        const grid2 = ui.createElement('div', ['analytics-grid']);
+        const grid2 = ui.createElement('div', ['analytics-grid', 'qs-orders-grid']);
         completedOrders.forEach(ord => buildOrderCard(grid2, ord, true));
         parent.appendChild(grid2);
     }
 }
 
 function buildOrderCard(container, ord, readonly = false) {
-    const card = ui.createElement('div', ['summary-card']);
-
-    // Header
-    const header = ui.createElement('div', [], { style: 'display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem;' });
-    header.appendChild(ui.createElementWithText('strong', `${getLanguage() === 'ar' ? 'طلب #' : 'Order #'}${ord.id}`, [], { style: 'font-size: 1.05rem;' }));
-
-    const statusColors = { 
-        new: 'badge-pending', pending_payment: 'badge-warning', waiting_for_driver: 'badge-info',
-        confirmed: 'badge-info', preparing: 'badge-info', ready_for_pickup: 'badge-success',
-        on_the_way: 'badge-info', completed: 'badge-success', declined: 'badge-danger'
-    };
-    const statusLabels = {
-        new: getLanguage() === 'ar' ? 'جديد' : 'New',
-        pending_payment: getLanguage() === 'ar' ? 'بانتظار الدفع' : 'Awaiting Payment',
-        waiting_for_driver: getLanguage() === 'ar' ? 'بانتظار سائق' : 'Awaiting Driver',
-        confirmed: getLanguage() === 'ar' ? 'مؤكد - ابدأ التجهيز' : 'Confirmed - Start Prep',
-        preparing: getLanguage() === 'ar' ? 'جارٍ التجهيز' : 'Preparing',
-        ready_for_pickup: getLanguage() === 'ar' ? 'جاهز' : 'Ready',
-        on_the_way: getLanguage() === 'ar' ? 'في الطريق' : 'On the Way',
-        completed: getLanguage() === 'ar' ? 'مكتمل' : 'Done',
-        declined: getLanguage() === 'ar' ? 'مرفوض' : 'Declined'
-    };
-    header.appendChild(ui.createElementWithText('span', statusLabels[ord.status] || ord.status, ['badge', statusColors[ord.status] || 'badge-info']));
-    card.appendChild(header);
-
-    card.appendChild(ui.createElementWithText('div', `👤 ${ord.customerName}`, [], { style: 'font-size: 0.85rem; margin-bottom: 0.25rem;' }));
-    const payText = (ord.rawOrder && ord.rawOrder.paymentMethod === 1) || ord.paymentMethod === 1
-        ? (getLanguage() === 'ar' ? '💳 دفع إلكتروني' : '💳 Online Payment')
-        : (getLanguage() === 'ar' ? '💵 كاش عند الاستلام' : '💵 Cash on Delivery');
-    card.appendChild(ui.createElementWithText('div', `${payText}`, [], { style: 'font-size: 0.85rem; font-weight: 700; color: var(--color-warning, #e67e22); margin-bottom: 0.25rem;' }));
-    card.appendChild(ui.createElementWithText('div', `📦 ${ord.items.length} ${getLanguage() === 'ar' ? 'صنف' : 'items'}`, [], { style: 'font-size: 0.85rem; margin-bottom: 0.25rem;' }));
-    card.appendChild(ui.createElementWithText('div', `💵 ${(parseFloat(ord.totalPrice) || 0).toFixed(2)} ج.م`, [], { style: 'font-weight: 800; color: var(--color-success); font-size: 1.1rem; margin-bottom: 0.75rem;' }));
-
-    const previewText = ord.items.map(it => `${it.qty}x ${it.name}`).join(', ');
-    card.appendChild(ui.createElementWithText('p', previewText.length > 60 ? previewText.slice(0, 57) + '...' : previewText, ['text-muted'], { style: 'font-size: 0.78rem; margin-bottom: 1rem;' }));
+    const isAr = getLanguage() === 'ar';
+    let onAccept = null;
+    let acceptText = '✔ تأكيد القبول';
 
     if (!readonly) {
-        const btnRow = ui.createElement('div', [], { style: 'display: flex; gap: 0.5rem; flex-wrap: wrap;' });
-
         if (ord.status === 'new' || ord.status === 'pending_payment') {
-            // New order: accept (set to waiting_for_driver=2) or decline
-            const acceptBtn = ui.createElementWithText('button', getLanguage() === 'ar' ? '✅ قبول الطلب' : '✅ Accept Order', ['btn', 'btn-primary', 'btn-sm'], { style: 'flex: 1; justify-content: center;' });
-            acceptBtn.addEventListener('click', () => {
-                // Cash (paymentMethod=0) → waiting_for_driver(2), Online (paymentMethod=1) → pending_payment(1)
+            acceptText = '✔ تأكيد القبول';
+            onAccept = () => {
                 const paymentMethod = ord.rawOrder ? ord.rawOrder.paymentMethod : 0;
                 const acceptStatus = paymentMethod === 1 ? 'pending_payment' : 'waiting_for_driver';
                 updateStatus(ord.id, acceptStatus);
-            });
-
-            btnRow.appendChild(acceptBtn);
+            };
         } else if (ord.status === 'confirmed') {
-            // Captain confirmed: market can now start preparing
-            const startBtn = ui.createElementWithText('button', getLanguage() === 'ar' ? '🛒 ابدأ التجهيز' : '🛒 Start Preparing', ['btn', 'btn-primary', 'btn-sm'], { style: 'flex: 1; justify-content: center;' });
-            startBtn.addEventListener('click', () => updateStatus(ord.id, 'preparing'));
-            btnRow.appendChild(startBtn);
+            acceptText = isAr ? '🛒 ابدأ التجهيز' : '🛒 Start Preparing';
+            onAccept = () => updateStatus(ord.id, 'preparing');
         } else if (ord.status === 'preparing') {
-            const readyBtn = ui.createElementWithText('button', getLanguage() === 'ar' ? '📦 جاهز للاستلام' : '📦 Mark Ready', ['btn', 'btn-success', 'btn-sm'], { style: 'flex: 1; justify-content: center;' });
-            readyBtn.addEventListener('click', () => updateStatus(ord.id, 'ready_for_pickup'));
-            btnRow.appendChild(readyBtn);
+            acceptText = isAr ? '📦 جاهز للاستلام' : '📦 Mark Ready';
+            onAccept = () => updateStatus(ord.id, 'ready_for_pickup');
         }
-
-        card.appendChild(btnRow);
     }
 
-    container.appendChild(card);
+    const cardView = ui.renderDashboardOrderCard(ord, {
+        readonly: readonly || !onAccept,
+        acceptText,
+        onAccept
+    });
+
+    container.appendChild(cardView);
 }
 
 /* ==========================================================================
