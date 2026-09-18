@@ -4,11 +4,23 @@
  * menu customizer modifiers, and emergency closure overlays.
  */
 
-import * as ui from './ui-utils.js';
+import * as ui from './ui-utils.js?v=29.0';
 import { t, getLanguage, setLanguage, initTranslations, subscribeLangChange } from './translations.js';
 import { ApiClient, ImageService, Logger } from './core.js';
 import { initFCMNotificationService } from './fcm-helper.js';
+import { initSignalRNotificationService, stopSignalRConnection } from './signalr-helper.js';
 console.log('🚀 restaurant.js module loaded');
+
+function clearInvalid(inputEl) {
+    if (!inputEl) return;
+    if (typeof ui.clearInputInvalid === 'function') {
+        ui.clearInputInvalid(inputEl);
+    } else {
+        inputEl.classList.remove('input-invalid');
+        const next = inputEl.nextElementSibling;
+        if (next && next.classList.contains('validation-error-msg')) next.remove();
+    }
+}
 
 let activeTab = 'queue';
 let myRestaurantId = null;
@@ -17,6 +29,7 @@ let orders = [];
 let categories = []; // In-memory categories state
 let discounts = []; // In-memory discounts state
 let offers = [];    // In-memory offers state
+let offerStatusFilter = 'all';
 let branches = [];  // In-memory branches state
 let categoriesLoaded = false;
 let discountsLoaded = false;
@@ -188,16 +201,30 @@ async function toggleActivityStatus() {
     return profile.active;
 }
 
+// Helper: Toggle store busy status via API (PATCH /api/v1/users/toggle-busy)
+async function toggleBusyStatus() {
+    const profile = JSON.parse(localStorage.getItem('qs_vendor_user') || '{}');
+    await apiFetch('/api/v1/users/toggle-busy', { method: 'PATCH' });
+    // Flip busy status locally
+    profile.busy = !(profile.busy === true || profile.busy === 1);
+    localStorage.setItem('qs_vendor_user', JSON.stringify(profile));
+    return profile.busy;
+}
+
 // Helper: Update user settings on profile (days/hours/description only)
 async function updateUserSettings(days, hours, descriptionText) {
     const profile = JSON.parse(localStorage.getItem('qs_vendor_user') || '{}');
+    const isBusy = !!(profile.busy === true || profile.busy === 1);
+    const body = {
+        name: profile.name || 'Vendor',
+        photo: profile.photo || '',
+        description: descriptionText,
+        busy: isBusy
+    };
+    if (profile.categoryId) body.categoryId = parseInt(profile.categoryId, 10);
     await apiFetch('/api/v1/users/update-profile', {
         method: 'PUT',
-        body: JSON.stringify({
-            name: profile.name || 'Vendor',
-            photo: profile.photo || '',
-            description: descriptionText
-        })
+        body: JSON.stringify(body)
     });
     // Update local user object
     profile.description = descriptionText;
@@ -367,12 +394,13 @@ async function refreshOffers() {
                 tempOffers.push({
                     id: o.id, name: o.name, price: o.price,
                     featuredPhoto: o.featuredPhoto || '',
+                    otherPhotos: Array.isArray(o.otherPhotos) && o.otherPhotos.length > 0 ? o.otherPhotos : (o.featuredPhoto ? [o.featuredPhoto] : []),
                     description: o.description || '',
                     active: o.active,
                     offerType: o.offerType, type: o.type,
-                    numberOfClicks: o.numberOfClicks || 0,
-                    numberOfWatches: o.numberOfWatches || 0,
-                    numberOfBooking: o.numberOfBooking || 0,
+                    numberOfClicks: o.numberOfClicks,
+                    numberOfWatches: o.numberOfWatches,
+                    numberOfBooking: o.numberOfBooking,
                     products: resolvedProducts,
                     createdOn: o.createdOn
                 });
@@ -477,21 +505,26 @@ async function refreshOrders() {
                     const menuItem = restaurantMenu.find(m => m.id === p.productId.toString());
                     const mods = menuItem ? menuItem.modifiers.map(m => m.name) : [];
                     return {
-                        name: p.productName || 'Dish',
+                        name: p.productName || (menuItem ? menuItem.name : 'Dish'),
                         qty: p.quantity,
                         price: p.price,
+                        image: (menuItem && (menuItem.image || menuItem.photo)) ? (menuItem.image || menuItem.photo) : (p.photo || p.image || ''),
                         modifiers: mods
                     };
                 });
                 return {
                     id: ord.id.toString(),
-                    vendorId: myRestaurantId.toString(),
+                    vendorId: myRestaurantId ? myRestaurantId.toString() : '',
                     status: mapBackendStatusToLocal(ord.status),
                     items: items,
                     totalPrice: ord.totalPrice - (ord.deliveryFee || 0) - (ord.orderFee || 0),
+                    deliveryFee: ord.deliveryFee || 0,
+                    finalTotal: ord.totalPrice,
+                    paymentMethod: ord.paymentMethod || (ord.rawOrder && ord.rawOrder.paymentMethod) || 0,
                     notes: ord.note || ord.notes || '',
                     customerName: ord.user ? ord.user.name : (getLanguage() === 'ar' ? 'عميل' : 'Customer'),
                     customerPhone: ord.user ? ord.user.phone : '',
+                    createdAt: ord.createdAt,
                     prepTime: 20,
                     captainName: '',
                     rawOrder: ord
@@ -744,11 +777,22 @@ export async function initRestaurant() {
             renderActiveTab();
         }
     });
+
+    // Initialize SignalR Real-Time Notifications
+    initSignalRNotificationService(apiClient, async (notification) => {
+        await refreshOrders();
+        updateBadges();
+        checkBuzzerAlarm();
+        if (activeTab === 'queue' || activeTab === 'progress') {
+            renderActiveTab();
+        }
+    });
     
     // Wire logout button in header
     const logoutBtn = document.getElementById('btn-logout');
     if (logoutBtn) {
-        logoutBtn.addEventListener('click', () => {
+        logoutBtn.addEventListener('click', async () => {
+            await stopSignalRConnection();
             localStorage.removeItem('qs_vendor_token');
             localStorage.removeItem('qs_vendor_user');
             window.location.replace('login.html?role=restaurant');
@@ -1137,51 +1181,10 @@ function renderQueueTab(parent) {
         return;
     }
     
+    const grid = ui.createElement('div', ['analytics-grid', 'qs-orders-grid'], { style: 'margin-bottom: 2rem;' });
+
     incomingOrders.forEach(ord => {
-        const card = ui.createElement('div', ['glass-panel'], { style: 'margin-bottom: 1rem;' });
-        
-        // Header
-        const header = ui.createElement('div', [], { style: 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem; margin-bottom: 0.75rem;' });
-        const orderText = getLanguage() === 'ar' ? `طلب رقم ${ord.id}` : `Order ${ord.id}`;
-        header.appendChild(ui.createElementWithText('strong', orderText, [], { style: 'font-size: 1.15rem;' }));
-        header.appendChild(ui.createElementWithText('span', t('rest_queue_order_mode'), ['badge', 'badge-info']));
-        card.appendChild(header);
-        
-        // Items list
-        const itemsList = ui.createElement('ul', [], { style: 'list-style: none; margin-bottom: 1rem;' });
-        ord.items.forEach(it => {
-            const li = ui.createElement('li', [], { style: 'padding: 0.25rem 0; font-size: 0.95rem;' });
-            li.appendChild(ui.createElementWithText('span', `${it.qty}x `, [], { style: 'font-weight: bold; color: var(--rest-color);' }));
-            li.appendChild(document.createTextNode(it.name));
-            
-            if (it.modifiers && it.modifiers.length > 0) {
-                const labelMod = getLanguage() === 'ar' ? ' + الإضافات: ' : ' + Modifiers: ';
-                const mods = ui.createElementWithText('div', labelMod + it.modifiers.join(', '), ['text-secondary'], { style: 'font-size: 0.8rem; margin-left: 1.5rem;' });
-                li.appendChild(mods);
-            }
-            itemsList.appendChild(li);
-        });
-        card.appendChild(itemsList);
-        
-        // Notes
-        if (ord.notes) {
-            const noteBox = ui.createElement('div', [], { style: 'background: rgba(255,165,0,0.05); border-left: 3px solid var(--color-pending); padding: 0.5rem; margin-bottom: 1rem; font-size: 0.85rem;' });
-            noteBox.appendChild(ui.createElementWithText('strong', t('rest_queue_order_notes')));
-            noteBox.appendChild(document.createTextNode(ord.notes));
-            card.appendChild(noteBox);
-        }
-        
-        // Total
-        const totalLine = ui.createElement('div', [], { style: 'font-size: 1rem; font-weight: 700; margin-bottom: 1rem; border-top: 1px dashed var(--border-color); padding-top: 0.75rem;' });
-        totalLine.appendChild(ui.createElementWithText('span', t('rest_queue_order_total'), ['text-secondary'], { style: 'font-weight: normal;' }));
-        totalLine.appendChild(ui.createElementWithText('strong', `${ord.totalPrice.toFixed(2)} ج.م`));
-        card.appendChild(totalLine);
-        
-        // Action Buttons
-        const actionRow = ui.createElement('div', [], { style: 'display: flex; gap: 0.75rem;' });
-        
-        const acceptBtn = ui.createElementWithText('button', t('rest_queue_btn_accept'), ['btn', 'btn-success']);
-        acceptBtn.addEventListener('click', async () => {
+        const onAccept = async () => {
             ui.stopAlarmSound();
             const prepTime = 20;
             const paymentMethod = ord.rawOrder ? ord.rawOrder.paymentMethod : 0;
@@ -1190,16 +1193,19 @@ function renderQueueTab(parent) {
             await updateStatus(ord.id, acceptStatus, { prepTime });
             ui.showToast(getLanguage() === 'ar' ? 'تم قبول الطلب بنجاح!' : 'Order accepted successfully!', 'success');
             
-            // Switch directly to Kitchen Kanban / Active Orders tab
             const targetTabBtn = document.getElementById('rest-menu-kanban') || document.getElementById('rest-menu-queue');
             if (targetTabBtn) targetTabBtn.click();
+        };
+
+        const cardView = ui.renderDashboardOrderCard(ord, {
+            acceptText: '✔ تأكيد القبول',
+            onAccept
         });
-        
-        actionRow.appendChild(acceptBtn);
-        card.appendChild(actionRow);
-        
-        parent.appendChild(card);
+
+        grid.appendChild(cardView);
     });
+
+    parent.appendChild(grid);
 }
 
 function showAcceptTimeModal(order) {
@@ -1363,49 +1369,7 @@ function renderProgressTab(parent) {
 }
 
 function showOrderDetailModal(order) {
-    const modalBody = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.75rem;' });
-    let statusText = order.status;
-    if (order.status === 'preparing') statusText = t('rest_progress_col_preparing');
-    else if (order.status === 'ready_for_pickup') statusText = t('rest_progress_col_ready');
-    else if (order.status === 'on_the_way') statusText = t('rest_progress_col_way');
-    else if (order.status === 'completed') statusText = t('rest_progress_col_completed');
-    
-    modalBody.appendChild(ui.createElementWithText('h4', t('rest_progress_modal_status', { status: statusText }), [], { style: 'color: var(--color-info);' }));
-    
-    const customerBlock = ui.createElement('div', [], { style: 'border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;' });
-    const customerInfo = ui.createElement('div');
-    customerInfo.appendChild(ui.createElementWithText('strong', t('rest_progress_modal_cust_title')));
-    customerInfo.appendChild(ui.createElementWithText('div', t('rest_progress_modal_cust_name', { name: order.customerName })));
-    customerInfo.appendChild(ui.createElementWithText('div', t('rest_progress_modal_cust_phone', { phone: ui.maskPII(order.customerPhone, 'phone') })));
-    customerBlock.appendChild(customerInfo);
-    modalBody.appendChild(customerBlock);
-    
-    if (order.captainName) {
-        const driverBlock = ui.createElement('div', [], { style: 'border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;' });
-        const driverInfo = ui.createElement('div');
-        driverInfo.appendChild(ui.createElementWithText('strong', t('rest_progress_modal_driver_title')));
-        driverInfo.appendChild(ui.createElementWithText('div', t('rest_progress_modal_driver_name', { name: order.captainName })));
-        const distText = getLanguage() === 'ar' ? 'المسافة إلى المطبخ: ~1.2 كم' : 'Distance to kitchen: ~1.2 km away';
-        driverInfo.appendChild(ui.createElementWithText('div', distText));
-        driverBlock.appendChild(driverInfo);
-        modalBody.appendChild(driverBlock);
-    }
-    
-    const itemsBlock = ui.createElement('div');
-    itemsBlock.appendChild(ui.createElementWithText('strong', t('rest_progress_modal_items_title')));
-    order.items.forEach(i => {
-        itemsBlock.appendChild(ui.createElementWithText('div', `• ${i.qty}x ${i.name} ($${(i.qty * i.price).toFixed(2)})`));
-    });
-    modalBody.appendChild(itemsBlock);
-
-    const printBtn = ui.createElementWithText('button', getLanguage() === 'ar' ? '🖨️ طباعة الفاتورة' : '🖨️ Print Receipt', ['btn', 'btn-primary'], {
-        style: 'margin-top: 1rem; width: 100%; font-weight: 700;'
-    });
-    printBtn.addEventListener('click', () => ui.printOrderReceipt(order));
-    modalBody.appendChild(printBtn);
-    
-    const labelHeader = getLanguage() === 'ar' ? `تفاصيل طلب ${order.id}` : `Order ${order.id} Breakdown`;
-    ui.showModal(labelHeader, modalBody);
+    ui.showOrderDetailsModal(order);
 }
 
 /* ==========================================================================
@@ -1545,6 +1509,79 @@ function renderMenuTab(parent) {
     runFilter();
 }
 
+function buildProductDiscountControl(currentDiscountIds, currentDiscountPct, initialPrice, typeNum = 0) {
+    const isAr = getLanguage() === 'ar';
+    const wrap = ui.createElement('div', [], {
+        style: 'background: rgba(0,0,0,0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem;'
+    });
+
+    const header = ui.createElementWithText('label', isAr ? '🏷️ الخصم / العرض (اختياري)' : '🏷️ Discount & Offer (Optional)', [], {
+        style: 'font-weight: 600; font-size: 0.85rem; color: var(--text-primary);'
+    });
+    wrap.appendChild(header);
+
+    // Dropdown for existing discounts only
+    const select = ui.createElement('select', ['select-input'], { style: 'width: 100%; font-size: 0.85rem;' });
+    select.appendChild(ui.createElementWithText('option', isAr ? '-- بدون خصم --' : '-- No Discount --', [], { value: '' }));
+
+    let activeId = '';
+    if (currentDiscountIds && currentDiscountIds.length > 0) {
+        activeId = currentDiscountIds[0].toString();
+    } else if (currentDiscountPct && discounts.length > 0) {
+        const found = discounts.find(d => d.percentage === currentDiscountPct);
+        if (found) activeId = found.id.toString();
+    }
+
+    discounts.forEach(d => {
+        const opt = ui.createElementWithText('option', `${d.name} (${d.percentage}%)`, [], { value: d.id.toString() });
+        if (d.id.toString() === activeId) opt.selected = true;
+        select.appendChild(opt);
+    });
+    wrap.appendChild(select);
+
+    // Live preview element
+    const previewEl = ui.createElement('div', [], {
+        style: 'font-size: 0.8rem; color: var(--brand-teal); font-weight: 600; display: none; margin-top: 0.25rem;'
+    });
+    wrap.appendChild(previewEl);
+
+    function updatePreview(price) {
+        let pct = 0;
+        if (select.value) {
+            const found = discounts.find(d => d.id.toString() === select.value);
+            if (found) pct = found.percentage;
+        }
+
+        const basePrice = parseFloat(price) || 0;
+        if (pct > 0 && basePrice > 0) {
+            const finalPrice = (basePrice * (1 - pct / 100)).toFixed(2);
+            previewEl.textContent = isAr
+                ? `⚡ السعر بعد الخصم: ${finalPrice} (${pct}% خصم)`
+                : `⚡ Price after discount: ${finalPrice} (${pct}% OFF)`;
+            previewEl.style.display = 'block';
+        } else {
+            previewEl.style.display = 'none';
+        }
+    }
+
+    select.addEventListener('change', () => {
+        // Handled via priceIn listener or direct update
+    });
+
+    async function resolveDiscountIds() {
+        if (select.value) {
+            return [parseInt(select.value)];
+        }
+        return [];
+    }
+
+    return {
+        element: wrap,
+        updatePreview,
+        resolveDiscountIds
+    };
+}
+
 function showEditItemModal(item) {
     const modalBody = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.75rem;' });
     
@@ -1566,28 +1603,16 @@ function showEditItemModal(item) {
     const qtyIn = ui.createElement('input', ['search-input'], { value: currentQty, type: 'number', style: 'width: 100%', min: '0', step: '1' });
     modalBody.appendChild(qtyIn);
 
-    // Discount Dropdown Selector
-    let activeDiscountId = '';
-    if (item.rawProduct) {
-        if (item.rawProduct.discountIds && item.rawProduct.discountIds.length > 0) {
-            activeDiscountId = item.rawProduct.discountIds[0].toString();
-        } else if (item.rawProduct.discountPercentage) {
-            const matched = discounts.find(d => d.percentage === item.rawProduct.discountPercentage);
-            if (matched) activeDiscountId = matched.id.toString();
-        }
-    }
+    // Discount Control
+    const currentDiscountIds = item.rawProduct ? item.rawProduct.discountIds : [];
+    const currentDiscountPct = item.rawProduct ? item.rawProduct.discountPercentage : 0;
+    const discountCtrl = buildProductDiscountControl(currentDiscountIds, currentDiscountPct, item.price, 0);
+    modalBody.appendChild(discountCtrl.element);
 
-    modalBody.appendChild(ui.createElementWithText('label', t('rest_add_modal_discount'), [], { style: 'font-size: 0.85rem;' }));
-    const discountSel = ui.createElement('select', ['select-input'], { style: 'width: 100%' });
-    discountSel.appendChild(ui.createElementWithText('option', t('rest_add_modal_no_discount'), [], { value: '' }));
-    discounts.forEach(d => {
-        const option = ui.createElementWithText('option', `${d.name} (${d.percentage}%)`, [], { value: d.id.toString() });
-        if (d.id.toString() === activeDiscountId) {
-            option.selected = true;
-        }
-        discountSel.appendChild(option);
-    });
-    modalBody.appendChild(discountSel);
+    priceIn.addEventListener('input', () => discountCtrl.updatePreview(priceIn.value));
+    discountCtrl.element.addEventListener('change', () => discountCtrl.updatePreview(priceIn.value));
+    discountCtrl.element.addEventListener('input', () => discountCtrl.updatePreview(priceIn.value));
+    discountCtrl.updatePreview(priceIn.value);
 
     // Edit Category Dropdown
     modalBody.appendChild(ui.createElementWithText('label', t('rest_add_modal_category'), [], { style: 'font-size: 0.85rem;' }));
@@ -1683,6 +1708,7 @@ function showEditItemModal(item) {
                 const selectedCatName = catSel.value;
                 const matchedCategory = categories.find(c => c.name === selectedCatName);
                 const categoryId = matchedCategory ? matchedCategory.id : 3;
+                const resolvedDiscountIds = await discountCtrl.resolveDiscountIds();
 
                 // Optimistic local update
                 const originalMenu = [...restaurantMenu];
@@ -1700,7 +1726,7 @@ function showEditItemModal(item) {
                         rawProduct: {
                             ...restaurantMenu[index].rawProduct,
                             quantity: quantity,
-                            discountIds: discountSel.value ? [parseInt(discountSel.value)] : []
+                            discountIds: resolvedDiscountIds
                         }
                     };
                     renderActiveTab();
@@ -1722,7 +1748,7 @@ function showEditItemModal(item) {
                             type: 0,
                             categoryId: categoryId,
                             creatorId: item.rawProduct ? item.rawProduct.creatorId : (myRestaurantId || 0),
-                            discountIds: discountSel.value ? [parseInt(discountSel.value)] : []
+                            discountIds: resolvedDiscountIds
                         })
                     });
                     ui.showToast(getLanguage() === 'ar' ? 'تم تحديث المنتج بنجاح' : 'Product updated successfully', 'success');
@@ -1793,43 +1819,36 @@ function showAddRestaurantMenuModal() {
     }
     catWrap.appendChild(catSel);
 
-    const row1 = ui.createElement('div', [], { style: 'display: grid; grid-template-columns: 2fr 1fr; gap: 1rem;' });
+    const row1 = ui.createElement('div', [], { style: 'display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;' });
     row1.appendChild(nameWrap);
     row1.appendChild(catWrap);
 
     // 2. Description
     const descWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
     descWrap.appendChild(ui.createElementWithText('label', t('rest_add_modal_desc'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
-    const descIn = ui.createElement('textarea', ['search-input'], {
-        style: 'min-height: 60px; font-family: inherit; resize: vertical;',
-        placeholder: 'e.g. Juicy double beef patty with melted cheddar...'
-    });
+    const descIn = ui.createElement('textarea', ['search-input'], { rows: 2, placeholder: 'e.g. 200g beef, cheddar cheese, secret sauce' });
     descWrap.appendChild(descIn);
 
-    // 3. Price & Quantity (row2)
+    // 3. Price & Quantity
     const priceWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
     priceWrap.appendChild(ui.createElementWithText('label', t('rest_add_modal_price'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
-    const priceIn = ui.createElement('input', ['search-input'], { type: 'number', step: '0.01', min: '0', value: '10.00' });
+    const priceIn = ui.createElement('input', ['search-input'], { type: 'number', step: '0.5', placeholder: '0.00' });
     priceWrap.appendChild(priceIn);
 
     const qtyWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
     qtyWrap.appendChild(ui.createElementWithText('label', t('rest_add_modal_quantity'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
-    const qtyIn = ui.createElement('input', ['search-input'], { type: 'number', min: '0', step: '1', value: '999' });
+    const qtyIn = ui.createElement('input', ['search-input'], { type: 'number', step: '1', min: '0', value: '999' });
     qtyWrap.appendChild(qtyIn);
 
     const row2 = ui.createElement('div', [], { style: 'display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;' });
     row2.appendChild(priceWrap);
     row2.appendChild(qtyWrap);
 
-    // 3.5 Discount Dropdown Selector
-    const discountWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
-    discountWrap.appendChild(ui.createElementWithText('label', t('rest_add_modal_discount'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
-    const discountSel = ui.createElement('select', ['select-input']);
-    discountSel.appendChild(ui.createElementWithText('option', t('rest_add_modal_no_discount'), [], { value: '' }));
-    discounts.forEach(d => {
-        discountSel.appendChild(ui.createElementWithText('option', `${d.name} (${d.percentage}%)`, [], { value: d.id.toString() }));
-    });
-    discountWrap.appendChild(discountSel);
+    // 3.5 Discount Control
+    const discountCtrl = buildProductDiscountControl([], 0, 0, 0);
+    priceIn.addEventListener('input', () => discountCtrl.updatePreview(priceIn.value));
+    discountCtrl.element.addEventListener('change', () => discountCtrl.updatePreview(priceIn.value));
+    discountCtrl.element.addEventListener('input', () => discountCtrl.updatePreview(priceIn.value));
 
     // Image upload row
     const imgWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
@@ -1891,7 +1910,7 @@ function showAddRestaurantMenuModal() {
     form.appendChild(row1);
     form.appendChild(descWrap);
     form.appendChild(row2);
-    form.appendChild(discountWrap);
+    form.appendChild(discountCtrl.element);
     form.appendChild(imgWrap);
     form.appendChild(availLabel);
 
@@ -1932,6 +1951,7 @@ function showAddRestaurantMenuModal() {
                 const selectedCatName = catSel.value;
                 const matchedCategory = categories.find(c => c.name === selectedCatName);
                 const categoryId = matchedCategory ? matchedCategory.id : 3;
+                const resolvedDiscountIds = await discountCtrl.resolveDiscountIds();
 
                 // Optimistic local update
                 const newProductObj = {
@@ -1945,7 +1965,7 @@ function showAddRestaurantMenuModal() {
                     modifiers: [],
                     rawProduct: {
                         quantity: quantity,
-                        discountIds: discountSel.value ? [parseInt(discountSel.value)] : []
+                        discountIds: resolvedDiscountIds
                     }
                 };
                 restaurantMenu.push(newProductObj);
@@ -1967,10 +1987,10 @@ function showAddRestaurantMenuModal() {
                             type: 0,
                             categoryId: categoryId,
                             creatorId: myRestaurantId || 0,
-                            discountIds: discountSel.value ? [parseInt(discountSel.value)] : []
+                            discountIds: resolvedDiscountIds
                         })
                     });
-                    ui.showToast(getLanguage() === 'ar' ? 'تمت إضافة المنتج بنجاح' : 'Product added successfully', 'success');
+                    ui.showToast(getLanguage() === 'ar' ? 'تمت إضافة الوجبة بنجاح' : 'Dish added successfully', 'success');
                     await refreshMenu();
                     if (activeTab === 'menu') renderActiveTab();
                 } catch (err) {
@@ -1992,16 +2012,51 @@ function showAddRestaurantMenuModal() {
 /* ==========================================================================
    Tab 4: Operations Weekly Scheduler (REST API /api/v1/schedules)
    ========================================================================== */
+function normalizeSchedule(raw) {
+    if (!raw) return null;
+    const id = raw.id != null ? Number(raw.id) : (raw.Id != null ? Number(raw.Id) : 0);
+    const startTime = (raw.startTime || raw.StartTime || '09:00:00').toString();
+    const endTime = (raw.endTime || raw.EndTime || '23:00:00').toString();
+    const type = raw.type != null ? Number(raw.type) : (raw.Type != null ? Number(raw.Type) : 1);
+
+    let days = [];
+    const rawDays = raw.daysOfWeek ?? raw.DaysOfWeek;
+    if (Array.isArray(rawDays)) {
+        days = rawDays.map(d => Number(d)).filter(d => !isNaN(d) && d >= 0 && d <= 6);
+    } else if (typeof rawDays === 'string') {
+        try {
+            const parsed = JSON.parse(rawDays);
+            if (Array.isArray(parsed)) {
+                days = parsed.map(d => Number(d)).filter(d => !isNaN(d) && d >= 0 && d <= 6);
+            }
+        } catch (_) {}
+    }
+
+    days = Array.from(new Set(days)).sort((a, b) => a - b);
+
+    return {
+        id,
+        startTime,
+        endTime,
+        type,
+        daysOfWeek: days,
+        creatorId: raw.creatorId ?? raw.CreatorId ?? null
+    };
+}
+
 async function refreshSchedules() {
     try {
         const userJson = localStorage.getItem('qs_vendor_user');
         let creatorId = null;
-        try { if (userJson) creatorId = JSON.parse(userJson).id || null; } catch (_) {}
+        try {
+            if (userJson) {
+                const u = JSON.parse(userJson);
+                creatorId = u.id != null ? Number(u.id) : null;
+            }
+        } catch (_) {}
 
         const bodyObj = { pageNumber: 1, pageSize: 100, enablePagination: false };
         if (creatorId) {
-            bodyObj.creatorId = creatorId;
-            bodyObj.filter = { creatorId: creatorId };
             bodyObj.filters = { creatorId: creatorId };
         }
 
@@ -2009,19 +2064,25 @@ async function refreshSchedules() {
             method: 'PATCH',
             body: JSON.stringify(bodyObj)
         });
-        if (res && res.success) {
-            let list = [];
-            if (Array.isArray(res.result)) list = res.result;
-            else if (res.result && Array.isArray(res.result.items)) list = res.result.items;
-            else if (res.result && Array.isArray(res.result.data)) list = res.result.data;
-            schedules = list;
-            schedulesLoaded = true;
-            return schedules;
-        } else {
-            schedules = [];
-            schedulesLoaded = true;
-            return [];
+        
+        let list = [];
+        if (res) {
+            if (Array.isArray(res)) {
+                list = res;
+            } else if (res.result) {
+                if (Array.isArray(res.result)) list = res.result;
+                else if (Array.isArray(res.result.items)) list = res.result.items;
+                else if (Array.isArray(res.result.data)) list = res.result.data;
+            } else if (Array.isArray(res.data)) {
+                list = res.data;
+            } else if (Array.isArray(res.items)) {
+                list = res.items;
+            }
         }
+
+        schedules = list.map(normalizeSchedule).filter(Boolean);
+        schedulesLoaded = true;
+        return schedules;
     } catch (err) {
         console.error('Failed to fetch schedules:', err);
         schedules = [];
@@ -2052,7 +2113,7 @@ async function deleteScheduleApi(id) {
 
 function formatScheduleTime(timeStr) {
     if (!timeStr) return '--:--';
-    const parts = timeStr.split(':');
+    const parts = timeStr.toString().split(':');
     if (parts.length < 2) return timeStr;
     let h = parseInt(parts[0], 10);
     const m = parts[1];
@@ -2085,50 +2146,6 @@ function renderScheduleTab(parent) {
     topBar.appendChild(addBtn);
 
     mainWrapper.appendChild(topBar);
-
-    // Emergency Closure Banner / Toggle Row
-    const userJsonNow = localStorage.getItem(apiClient.getUserKey());
-    const uNow = JSON.parse(userJsonNow || '{}');
-    const isCurrentlyClosed = (uNow.active === 0 || uNow.active === false);
-
-    const closurePanel = ui.createElement('div', [], { style: 'padding: 1.25rem 1.5rem; background: rgba(255, 71, 87, 0.05); border: 1px solid rgba(255, 71, 87, 0.2); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;' });
-    
-    const closureText = ui.createElement('div', []);
-    closureText.appendChild(ui.createElementWithText('strong', t('rest_sched_closure_title'), [], { style: 'display: block; font-size: 0.95rem; color: var(--color-danger); margin-bottom: 0.2rem;' }));
-    closureText.appendChild(ui.createElementWithText('span', t('rest_sched_closure_desc'), ['text-secondary'], { style: 'font-size: 0.82rem;' }));
-    closurePanel.appendChild(closureText);
-
-    const switchLabel = ui.createElement('label', ['switch-container'], { style: 'display: inline-flex; align-items: center; gap: 0.75rem; cursor: pointer;' });
-    const switchInput = ui.createElement('input', ['switch-input', 'switch-danger'], {
-        type: 'checkbox',
-        checked: isCurrentlyClosed ? 'checked' : ''
-    });
-    
-    const closureStatusText = ui.createElementWithText('span', isCurrentlyClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off'), [], { style: 'font-weight: 700; font-size: 0.9rem;' });
-
-    switchInput.addEventListener('change', async (e) => {
-        switchInput.disabled = true;
-        try {
-            await toggleActivityStatus();
-            const updatedUser = JSON.parse(localStorage.getItem(apiClient.getUserKey()) || '{}');
-            const nowClosed = (updatedUser.active === 0 || updatedUser.active === false);
-            closureStatusText.textContent = nowClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off');
-            ui.showToast(nowClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off'), nowClosed ? 'warning' : 'success');
-        } catch (err) {
-            console.error('Failed to toggle activity status:', err);
-            ui.showToast(t('error_generic') + ': ' + err.message, 'error');
-            e.target.checked = !e.target.checked;
-        } finally {
-            switchInput.disabled = false;
-        }
-    });
-
-    const slider = ui.createElement('span', ['switch-slider']);
-    switchLabel.appendChild(switchInput);
-    switchLabel.appendChild(slider);
-    switchLabel.appendChild(closureStatusText);
-    closurePanel.appendChild(switchLabel);
-    mainWrapper.appendChild(closurePanel);
 
     // Schedule Cards Grid Container
     const gridContainer = ui.createElement('div', [], { style: 'display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.25rem; width: 100%;' });
@@ -2194,7 +2211,7 @@ function renderScheduleTab(parent) {
             timeBox.appendChild(ui.createElementWithText('span', `${formatScheduleTime(item.startTime)} — ${formatScheduleTime(item.endTime)}`, [], { style: 'font-weight: 700; font-size: 1.05rem; letter-spacing: 0.3px;' }));
             card.appendChild(timeBox);
 
-            // Operating Days Pills
+            // Operating Days Pills (Show only active days)
             const daysWrapper = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.4rem;' });
             daysWrapper.appendChild(ui.createElementWithText('span', t('sched_days_label') + ':', ['text-secondary'], { style: 'font-size: 0.8rem;' }));
 
@@ -2202,15 +2219,26 @@ function renderScheduleTab(parent) {
             
             const activeDays = Array.isArray(item.daysOfWeek) ? item.daysOfWeek : [];
             const orderedDays = [6, 0, 1, 2, 3, 4, 5];
-            orderedDays.forEach((d) => {
-                const isActive = activeDays.includes(d);
-                const dayPill = ui.createElementWithText('span', getDayName(d), [], {
-                    style: isActive
-                        ? 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.2rem 0.55rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600;'
-                        : 'background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.3); padding: 0.2rem 0.55rem; border-radius: 12px; font-size: 0.75rem; text-decoration: line-through;'
+            const filteredActiveDays = orderedDays.filter(d => activeDays.includes(d));
+
+            if (filteredActiveDays.length === 7) {
+                const allPill = ui.createElementWithText('span', isAr ? '🌍 طوال أيام الأسبوع' : '🌍 All Week Days', [], {
+                    style: 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.25rem 0.65rem; border-radius: 12px; font-size: 0.78rem; font-weight: 600;'
                 });
-                daysContainer.appendChild(dayPill);
-            });
+                daysContainer.appendChild(allPill);
+            } else if (filteredActiveDays.length > 0) {
+                filteredActiveDays.forEach((d) => {
+                    const dayPill = ui.createElementWithText('span', getDayName(d), [], {
+                        style: 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.78rem; font-weight: 600;'
+                    });
+                    daysContainer.appendChild(dayPill);
+                });
+            } else {
+                const emptyPill = ui.createElementWithText('span', isAr ? 'لا توجد أيام محددة' : 'No days selected', ['text-secondary'], {
+                    style: 'font-size: 0.78rem; font-style: italic;'
+                });
+                daysContainer.appendChild(emptyPill);
+            }
 
             daysWrapper.appendChild(daysContainer);
             card.appendChild(daysWrapper);
@@ -2222,19 +2250,17 @@ function renderScheduleTab(parent) {
     mainWrapper.appendChild(gridContainer);
     parent.appendChild(mainWrapper);
 
-    // Initial Data Fetch
-    if (schedulesLoaded) {
-        renderGridContent();
-        refreshSchedules().then(() => renderGridContent());
-    } else {
-        ui.renderShimmerGrid(gridContainer);
-        refreshSchedules().then(() => renderGridContent());
-    }
+    // Fetch Live Schedules from API
+    ui.renderShimmerGrid(gridContainer);
+    refreshSchedules().then(() => renderGridContent());
 }
 
 function showScheduleModal(existingItem = null, onSuccessCallback = null) {
     const isAr = getLanguage() === 'ar';
-    const titleStr = existingItem ? (isAr ? '✏️ تعديل الموعد' : '✏️ Edit Schedule') : (isAr ? '➕ إضافة موعد جديد' : '➕ Add New Schedule');
+    const normExisting = existingItem ? normalizeSchedule(existingItem) : null;
+    const isEdit = Boolean(normExisting && normExisting.id);
+
+    const titleStr = isEdit ? (isAr ? '✏️ تعديل الموعد' : '✏️ Edit Schedule') : (isAr ? '➕ إضافة موعد جديد' : '➕ Add New Schedule');
     const modalContent = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 1.25rem; width: 100%; max-width: 480px;' });
 
     // Helpful Tip Banner
@@ -2253,12 +2279,14 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
     const optClosed = ui.createElementWithText('option', t('sched_type_closed'), [], { value: '2' });
     typeSelect.appendChild(optWorking);
     typeSelect.appendChild(optClosed);
-    typeSelect.value = existingItem ? String(existingItem.type || 1) : '1';
+    typeSelect.value = normExisting ? String(normExisting.type || 1) : '1';
     typeGroup.appendChild(typeSelect);
     modalContent.appendChild(typeGroup);
 
     // 2. Days Multi-Select
-    let selectedDays = existingItem && Array.isArray(existingItem.daysOfWeek) ? [...existingItem.daysOfWeek] : [6, 0, 1, 2, 3, 4, 5];
+    let selectedDays = normExisting && Array.isArray(normExisting.daysOfWeek) && normExisting.daysOfWeek.length > 0
+        ? [...normExisting.daysOfWeek]
+        : [6, 0, 1, 2, 3, 4, 5];
 
     const daysGroup = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.5rem;' });
     
@@ -2269,7 +2297,7 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
     
     const btnAll = ui.createElementWithText('button', t('sched_select_all'), ['btn', 'btn-link', 'btn-xs'], { type: 'button', style: 'font-size: 0.75rem; text-decoration: underline;' });
     btnAll.addEventListener('click', () => {
-        selectedDays = [0, 1, 2, 3, 4, 5, 6];
+        selectedDays = [6, 0, 1, 2, 3, 4, 5];
         updateDaysUI();
     });
     quickActions.appendChild(btnAll);
@@ -2302,6 +2330,7 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
                     selectedDays = selectedDays.filter(day => day !== d);
                 } else {
                     selectedDays.push(d);
+                    selectedDays.sort((a, b) => a - b);
                 }
                 updateDaysUI();
             });
@@ -2317,8 +2346,10 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
 
     const extractHHMM = (str) => {
         if (!str) return '09:00';
-        const parts = str.split(':');
-        if (parts.length >= 2) return `${parts[0].padStart(2, '0')}:${parts[1].padStart(2, '0')}`;
+        const match = str.toString().match(/(\d{1,2}):(\d{2})/);
+        if (match) {
+            return `${match[1].padStart(2, '0')}:${match[2]}`;
+        }
         return '09:00';
     };
 
@@ -2326,7 +2357,7 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
     startInputBox.appendChild(ui.createElementWithText('label', t('sched_start_time'), [], { style: 'font-size: 0.85rem; font-weight: 600;' }));
     const startTimeInput = ui.createElement('input', ['search-input'], {
         type: 'time',
-        value: existingItem ? extractHHMM(existingItem.startTime) : '09:00'
+        value: normExisting ? extractHHMM(normExisting.startTime) : '09:00'
     });
     startInputBox.appendChild(startTimeInput);
     timesGroup.appendChild(startInputBox);
@@ -2335,7 +2366,7 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
     endInputBox.appendChild(ui.createElementWithText('label', t('sched_end_time'), [], { style: 'font-size: 0.85rem; font-weight: 600;' }));
     const endTimeInput = ui.createElement('input', ['search-input'], {
         type: 'time',
-        value: existingItem ? extractHHMM(existingItem.endTime) : '23:00'
+        value: normExisting ? extractHHMM(normExisting.endTime) : '23:00'
     });
     endInputBox.appendChild(endTimeInput);
     timesGroup.appendChild(endInputBox);
@@ -2363,21 +2394,23 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
         saveBtn.disabled = true;
         saveBtn.textContent = isAr ? 'جاري الحفظ...' : 'Saving...';
 
-        const startTimeFull = startTimeInput.value.length === 5 ? `${startTimeInput.value}:00` : startTimeInput.value;
-        const endTimeFull = endTimeInput.value.length === 5 ? `${endTimeInput.value}:00` : endTimeInput.value;
+        const sVal = startTimeInput.value.trim();
+        const eVal = endTimeInput.value.trim();
+        const startTimeFull = sVal.length === 5 ? `${sVal}:00` : sVal;
+        const endTimeFull = eVal.length === 5 ? `${eVal}:00` : eVal;
 
         const payload = {
             startTime: startTimeFull,
             endTime: endTimeFull,
             type: parseInt(typeSelect.value, 10),
-            daysOfWeek: selectedDays
+            daysOfWeek: selectedDays.map(Number)
         };
-        if (existingItem && existingItem.id) {
-            payload.id = existingItem.id;
+        if (isEdit) {
+            payload.id = Number(normExisting.id);
         }
 
         try {
-            if (existingItem && existingItem.id) {
+            if (isEdit) {
                 await updateSchedule(payload);
                 ui.showToast(isAr ? 'تم تحديث الموعد بنجاح' : 'Schedule updated successfully', 'success');
             } else {
@@ -2389,7 +2422,7 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
             if (onSuccessCallback) onSuccessCallback();
         } catch (err) {
             console.error('Save schedule error:', err);
-            ui.showToast(t('error_generic') + ': ' + err.message, 'error');
+            ui.showToast(t('error_generic') + ': ' + (err.message || err), 'error');
         } finally {
             saveBtn.disabled = false;
             saveBtn.textContent = isAr ? 'حفظ الموعد' : 'Save Schedule';
@@ -2982,10 +3015,178 @@ async function handleDeleteDiscount(disc) {
 /* ==========================================================================
    Tab 7: Promotional Offers
    ========================================================================== */
+function showEditRestOfferModal(offer) {
+    const isAr = getLanguage() === 'ar';
+    const form = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 1rem; min-width: 320px; max-width: 480px;' });
+
+    // Name
+    const nameWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
+    nameWrap.appendChild(ui.createElementWithText('label', t('offer_modal_name'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+    const nameIn = ui.createElement('input', ['search-input'], { type: 'text', value: offer.name || '' });
+    nameWrap.appendChild(nameIn);
+    form.appendChild(nameWrap);
+
+    // Description
+    const descWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
+    descWrap.appendChild(ui.createElementWithText('label', t('offer_modal_desc'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+    const descIn = ui.createElement('textarea', ['search-input'], { style: 'min-height: 60px; font-family: inherit; resize: vertical;' });
+    descIn.value = offer.description || '';
+    descWrap.appendChild(descIn);
+    form.appendChild(descWrap);
+
+    // Price
+    const priceWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
+    priceWrap.appendChild(ui.createElementWithText('label', t('offer_modal_price'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+    const priceIn = ui.createElement('input', ['search-input'], { type: 'number', step: '0.01', min: '0', value: offer.price || '0' });
+    priceWrap.appendChild(priceIn);
+    form.appendChild(priceWrap);
+
+    // Featured Image
+    const imgWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
+    imgWrap.appendChild(ui.createElementWithText('label', t('offer_modal_photo'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+    const imgRow = ui.createElement('div', [], { style: 'display: flex; gap: 1rem; align-items: center;' });
+    const imgInput = ui.createElement('input', [], { type: 'file', accept: 'image/*', style: 'display: none;' });
+    const uploadImgBtn = ui.createElementWithText('button', isAr ? 'تغيير الصورة' : 'Change Image', ['btn', 'btn-secondary']);
+    uploadImgBtn.addEventListener('click', () => imgInput.click());
+
+    let uploadedPhotoKey = offer.featuredPhoto || '';
+    const previewImg = ui.createElement('img', [], {
+        src: uploadedPhotoKey ? getImageUrl(uploadedPhotoKey) : '',
+        style: `width: 50px; height: 50px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); object-fit: cover; display: ${uploadedPhotoKey ? 'block' : 'none'};`
+    });
+
+    imgInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            previewImg.src = URL.createObjectURL(file);
+            previewImg.style.display = 'block';
+            try {
+                const result = await uploadImage(file);
+                if (result) {
+                    uploadedPhotoKey = result;
+                    previewImg.src = getImageUrl(uploadedPhotoKey);
+                }
+            } catch (_) {
+                ui.showToast(t('offer_modal_img_upload_error'), 'error');
+            }
+        }
+    });
+    imgRow.appendChild(uploadImgBtn);
+    imgRow.appendChild(imgInput);
+    imgRow.appendChild(previewImg);
+    imgWrap.appendChild(imgRow);
+    form.appendChild(imgWrap);
+
+    // Active Toggle Switch
+    const activeLabel = ui.createElement('label', ['switch-container'], { style: 'margin-top: 0.5rem;' });
+    const activeInput = ui.createElement('input', ['switch-input'], { type: 'checkbox' });
+    activeInput.checked = !!offer.active;
+    const activeSlider = ui.createElement('div', ['switch-slider']);
+    activeLabel.appendChild(activeInput);
+    activeLabel.appendChild(activeSlider);
+    activeLabel.appendChild(ui.createElementWithText('span', isAr ? 'تفعيل العرض' : 'Enable Offer', [], { style: 'font-size: 0.85rem; font-weight: 600;' }));
+    form.appendChild(activeLabel);
+
+    ui.showModal(isAr ? '✏️ تعديل العرض' : '✏️ Edit Offer', form, [
+        {
+            text: isAr ? 'حفظ التعديلات' : 'Save Changes',
+            type: 'success',
+            closeOnClick: false,
+            onClick: async () => {
+                const name = nameIn.value.trim();
+                const priceVal = priceIn.value.trim();
+                const description = descIn.value.trim();
+
+                clearInvalid(nameIn);
+                clearInvalid(priceIn);
+
+                if (!name) {
+                    ui.setInputInvalid(nameIn, t('offer_modal_err_name'));
+                    return;
+                }
+                const price = parseFloat(priceVal);
+                if (!priceVal || isNaN(price) || price < 0) {
+                    ui.setInputInvalid(priceIn, t('offer_modal_err_price'));
+                    return;
+                }
+
+                try {
+                    const otherPhotosList = (Array.isArray(offer.otherPhotos) && offer.otherPhotos.length > 0)
+                        ? offer.otherPhotos
+                        : (uploadedPhotoKey ? [uploadedPhotoKey] : (offer.featuredPhoto ? [offer.featuredPhoto] : []));
+
+                    const updateBody = {
+                        id: offer.id,
+                        name: name,
+                        price: price,
+                        description: description,
+                        featuredPhoto: uploadedPhotoKey,
+                        otherPhotos: otherPhotosList,
+                        active: activeInput.checked,
+                        offerType: offer.offerType ?? 1,
+                        type: offer.type ?? 0
+                    };
+                    if (offer.products && Array.isArray(offer.products)) {
+                        updateBody.productId = offer.products.map(p => ({
+                            productId: p.id || p.productId,
+                            quantity: p.quantity || 1
+                        }));
+                    }
+
+                    await apiFetch('/api/v1/offers', {
+                        method: 'PUT',
+                        body: JSON.stringify(updateBody)
+                    });
+
+                    ui.showToast(isAr ? 'تم تعديل العرض بنجاح' : 'Offer updated successfully', 'success');
+                    ui.closeModal();
+                    await refreshOffers();
+                    renderActiveTab();
+                } catch (e) {
+                    console.error('Failed to update offer:', e);
+                    ui.showToast((isAr ? 'فشل تعديل العرض: ' : 'Failed to update offer: ') + e.message, 'error');
+                }
+            }
+        },
+        {
+            text: t('btn_cancel'),
+            type: 'secondary',
+            onClick: ui.closeModal
+        }
+    ]);
+}
+
 function renderOffersTab(parent) {
+    const isAr = getLanguage() === 'ar';
     const wrapper = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 1rem; width: 100%;' });
 
-    const topBar = ui.createElement('div', [], { style: 'display: flex; justify-content: flex-end;' });
+    const topBar = ui.createElement('div', [], { style: 'display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;' });
+
+    // Status Filter Select
+    const filterWrap = ui.createElement('div', [], { style: 'display: flex; gap: 0.5rem; align-items: center;' });
+    filterWrap.appendChild(ui.createElementWithText('span', isAr ? 'فلترة العروض:' : 'Filter Offers:', [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+
+    const filterSelect = ui.createElement('select', ['search-input'], { style: 'padding: 0.4rem 0.8rem; font-size: 0.85rem; border-radius: var(--radius-md); width: auto;' });
+    const optAll = ui.createElementWithText('option', isAr ? 'الكل' : 'All', [], { value: 'all' });
+    const optActive = ui.createElementWithText('option', isAr ? 'نشط' : 'Active', [], { value: 'active' });
+    const optInactive = ui.createElementWithText('option', isAr ? 'غير نشط' : 'Inactive', [], { value: 'inactive' });
+
+    if (offerStatusFilter === 'active') optActive.selected = true;
+    else if (offerStatusFilter === 'inactive') optInactive.selected = true;
+    else optAll.selected = true;
+
+    filterSelect.appendChild(optAll);
+    filterSelect.appendChild(optActive);
+    filterSelect.appendChild(optInactive);
+
+    filterSelect.addEventListener('change', (e) => {
+        offerStatusFilter = e.target.value;
+        renderActiveTab();
+    });
+
+    filterWrap.appendChild(filterSelect);
+    topBar.appendChild(filterWrap);
+
     const addOfferBtn = ui.createElementWithText('button', t('offer_add_btn'), ['btn', 'btn-primary']);
     addOfferBtn.addEventListener('click', showAddRestOfferModal);
     topBar.appendChild(addOfferBtn);
@@ -2993,13 +3194,19 @@ function renderOffersTab(parent) {
 
     const grid = ui.createElement('div', ['analytics-grid'], { style: 'margin-top: 1rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem; width: 100%;' });
 
-    if (offers.length === 0) {
+    const filteredOffers = offers.filter(o => {
+        if (offerStatusFilter === 'active') return !!o.active;
+        if (offerStatusFilter === 'inactive') return !o.active;
+        return true;
+    });
+
+    if (filteredOffers.length === 0) {
         const emptyState = ui.createElement('div', ['glass-panel'], { style: 'text-align: center; padding: 3rem 1.5rem; width: 100%; grid-column: 1 / -1;' });
         emptyState.appendChild(ui.createElementWithText('h3', t('offer_empty_title'), [], { style: 'margin-bottom: 0.5rem; font-size: 1.25rem;' }));
         emptyState.appendChild(ui.createElementWithText('p', t('offer_empty_desc'), ['text-secondary'], { style: 'font-size: 0.85rem;' }));
         grid.appendChild(emptyState);
     } else {
-        offers.forEach(offer => {
+        filteredOffers.forEach(offer => {
             const card = ui.createElement('div', ['summary-card'], { style: 'display: flex; flex-direction: column; min-height: 260px; position: relative; overflow: hidden;' });
 
             // Accent blob
@@ -3021,12 +3228,20 @@ function renderOffersTab(parent) {
                 card.appendChild(imgPlaceholder);
             }
 
-            // Header row: name + delete
+            // Header row: name + actions (Edit + Delete)
             const headerRow = ui.createElement('div', [], { style: 'display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem; margin-bottom: 0.4rem;' });
             headerRow.appendChild(ui.createElementWithText('strong', offer.name || '-', [], { style: 'font-size: 1.05rem; font-weight: 700; color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }));
-            const delBtn = ui.createElementWithText('button', '🗑️', ['btn', 'btn-danger', 'btn-sm'], { style: 'padding: 0.25rem 0.5rem; font-size: 0.85rem; border-radius: 4px; flex-shrink: 0;' });
+            
+            const btnGroup = ui.createElement('div', [], { style: 'display: flex; gap: 0.35rem; flex-shrink: 0;' });
+            const editBtn = ui.createElementWithText('button', '✏️', ['btn', 'btn-secondary', 'btn-sm'], { style: 'padding: 0.25rem 0.5rem; font-size: 0.85rem; border-radius: 4px;' });
+            editBtn.addEventListener('click', () => showEditRestOfferModal(offer));
+            btnGroup.appendChild(editBtn);
+
+            const delBtn = ui.createElementWithText('button', '🗑️', ['btn', 'btn-danger', 'btn-sm'], { style: 'padding: 0.25rem 0.5rem; font-size: 0.85rem; border-radius: 4px;' });
             delBtn.addEventListener('click', () => handleRestDeleteOffer(offer));
-            headerRow.appendChild(delBtn);
+            btnGroup.appendChild(delBtn);
+
+            headerRow.appendChild(btnGroup);
             card.appendChild(headerRow);
 
             // Description
@@ -3039,7 +3254,7 @@ function renderOffersTab(parent) {
                 const prodContainer = ui.createElement('div', [], { 
                     style: 'margin: 0.4rem 0; padding: 0.4rem 0.6rem; background: rgba(0, 0, 0, 0.02); border-radius: 6px; border: 1px dashed var(--border-color); max-height: 90px; overflow-y: auto;' 
                 });
-                const prodTitle = ui.createElementWithText('div', getLanguage() === 'ar' ? '📦 المنتجات المشمولة:' : '📦 Included Products:', [], { 
+                const prodTitle = ui.createElementWithText('div', isAr ? '📦 المنتجات المشمولة:' : '📦 Included Products:', [], { 
                     style: 'font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 0.25rem;' 
                 });
                 prodContainer.appendChild(prodTitle);
@@ -3048,7 +3263,7 @@ function renderOffersTab(parent) {
                 offer.products.forEach(p => {
                     const item = ui.createElement('div', [], { style: 'display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; color: var(--text-primary);' });
                     const qtyStr = p.quantity && p.quantity > 1 ? ` (x${p.quantity})` : '';
-                    item.appendChild(ui.createElementWithText('span', `• ${p.name || (getLanguage() === 'ar' ? 'منتج غير معروف' : 'Unknown Product')}${qtyStr}`, [], { 
+                    item.appendChild(ui.createElementWithText('span', `• ${p.name || (isAr ? 'منتج غير معروف' : 'Unknown Product')}${qtyStr}`, [], { 
                         style: 'text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 70%;' 
                     }));
                     if (p.price) {
@@ -3065,6 +3280,62 @@ function renderOffersTab(parent) {
             priceEl.appendChild(ui.createElementWithText('span', `$${(offer.price || 0).toFixed(2)}`, [], { style: 'font-size: 1.6rem; font-weight: 800; color: var(--rest-color, #e74c3c); font-family: "Outfit", sans-serif;' }));
             card.appendChild(priceEl);
 
+            // Active Toggle Switch on Card
+            const activeToggleWrap = ui.createElement('div', [], { style: 'display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; padding: 0.4rem 0.6rem; background: rgba(0, 0, 0, 0.03); border-radius: 6px; border: 1px solid var(--border-color);' });
+            activeToggleWrap.appendChild(ui.createElementWithText('span', isAr ? 'تفعيل العرض' : 'Enable Offer', [], { style: 'font-size: 0.8rem; font-weight: 600;' }));
+
+            const isOfferActive = !!offer.active;
+            const swLabel = ui.createElement('label', ['switch-container']);
+            const swInput = ui.createElement('input', ['switch-input'], { type: 'checkbox' });
+            swInput.checked = isOfferActive;
+
+            swInput.addEventListener('change', async (e) => {
+                swInput.disabled = true;
+                const newActive = swInput.checked;
+                try {
+                    const otherPhotosList = (Array.isArray(offer.otherPhotos) && offer.otherPhotos.length > 0)
+                        ? offer.otherPhotos
+                        : (offer.featuredPhoto ? [offer.featuredPhoto] : []);
+
+                    const updateBody = {
+                        id: offer.id,
+                        name: offer.name,
+                        price: parseFloat(offer.price) || 0,
+                        description: offer.description || '',
+                        featuredPhoto: offer.featuredPhoto || '',
+                        otherPhotos: otherPhotosList,
+                        active: newActive,
+                        offerType: offer.offerType ?? 1,
+                        type: offer.type ?? 0
+                    };
+                    if (offer.products && Array.isArray(offer.products)) {
+                        updateBody.productId = offer.products.map(p => ({
+                            productId: p.id || p.productId,
+                            quantity: p.quantity || 1
+                        }));
+                    }
+                    await apiFetch('/api/v1/offers', {
+                        method: 'PUT',
+                        body: JSON.stringify(updateBody)
+                    });
+                    offer.active = newActive;
+                    ui.showToast(newActive ? (isAr ? 'تم تفعيل العرض بنجاح' : 'Offer enabled') : (isAr ? 'تم إيقاف العرض بنجاح' : 'Offer disabled'), 'success');
+                    await refreshOffers();
+                    renderActiveTab();
+                } catch (err) {
+                    console.error('Failed to toggle offer active status:', err);
+                    ui.showToast((isAr ? 'خطأ في تغيير حالة العرض' : 'Error toggling offer status') + ': ' + err.message, 'error');
+                    e.target.checked = !e.target.checked;
+                } finally {
+                    swInput.disabled = false;
+                }
+            });
+
+            swLabel.appendChild(swInput);
+            swLabel.appendChild(ui.createElement('span', ['switch-slider']));
+            activeToggleWrap.appendChild(swLabel);
+            card.appendChild(activeToggleWrap);
+
             // Status badges
             const badgeRow = ui.createElement('div', [], { style: 'display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.75rem;' });
             if (offer.active) {
@@ -3072,25 +3343,22 @@ function renderOffersTab(parent) {
             } else {
                 badgeRow.appendChild(ui.createElementWithText('span', t('offer_status_inactive'), ['badge', 'badge-danger']));
             }
-            if (offer.offerType === 1) {
-                badgeRow.appendChild(ui.createElementWithText('span', '🛠️ ' + t('offer_badge_editable'), ['badge', 'badge-secondary']));
-            } else {
-                badgeRow.appendChild(ui.createElementWithText('span', '🔒 ' + t('offer_badge_fixed'), ['badge', 'badge-secondary'], { style: 'background-color: #7f8c8d;' }));
-            }
             card.appendChild(badgeRow);
 
-            // Stats row
-            const statsRow = ui.createElement('div', [], { style: 'display: flex; gap: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.75rem; margin-top: auto; font-size: 0.75rem; color: var(--text-muted);' });
-            const makeStatEl = (icon, val, label) => {
-                const el = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; align-items: center; gap: 0.15rem;' });
-                el.appendChild(ui.createElementWithText('span', `${icon} ${val}`, [], { style: 'font-weight: 700; font-size: 0.85rem; color: var(--text-primary);' }));
-                el.appendChild(ui.createElementWithText('span', label, [], {}));
-                return el;
-            };
-            statsRow.appendChild(makeStatEl('👆', offer.numberOfClicks || 0, t('offer_clicks')));
-            statsRow.appendChild(makeStatEl('👁️', offer.numberOfWatches || 0, t('offer_watches')));
-            statsRow.appendChild(makeStatEl('📋', offer.numberOfBooking || 0, t('offer_bookings')));
-            card.appendChild(statsRow);
+            // Stats row (only rendered if returned by API)
+            if (offer.numberOfClicks !== undefined || offer.numberOfWatches !== undefined || offer.numberOfBooking !== undefined) {
+                const statsRow = ui.createElement('div', [], { style: 'display: flex; gap: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.75rem; margin-top: auto; font-size: 0.75rem; color: var(--text-muted);' });
+                const makeStatEl = (icon, val, label) => {
+                    const el = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; align-items: center; gap: 0.15rem;' });
+                    el.appendChild(ui.createElementWithText('span', `${icon} ${val}`, [], { style: 'font-weight: 700; font-size: 0.85rem; color: var(--text-primary);' }));
+                    el.appendChild(ui.createElementWithText('span', label, [], {}));
+                    return el;
+                };
+                if (offer.numberOfClicks !== undefined) statsRow.appendChild(makeStatEl('👆', offer.numberOfClicks, t('offer_clicks')));
+                if (offer.numberOfWatches !== undefined) statsRow.appendChild(makeStatEl('👁️', offer.numberOfWatches, t('offer_watches')));
+                if (offer.numberOfBooking !== undefined) statsRow.appendChild(makeStatEl('📋', offer.numberOfBooking, t('offer_bookings')));
+                if (statsRow.children.length > 0) card.appendChild(statsRow);
+            }
 
             grid.appendChild(card);
         });
@@ -3320,6 +3588,58 @@ function showAddRestOfferModal() {
                 ui.closeModal();
 
                 try {
+                    const response = await apiFetch('/api/v1/offers', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            name, price, description,
+                            featuredPhoto: uploadedPhotoKey,
+                            otherPhotos: [],
+                            active: activeInput.checked,
+                            productId: productObjectsList,
+                            productIds: selectedProductIds,
+                            type: 0,   // Restaurant
+                            offerType: isEditable
+                        })
+                    });
+                    ui.showToast(getLanguage() === 'ar' ? 'تمت إضافة العرض بنجاح' : 'Offer created successfully', 'success');
+                    const idx = offers.findIndex(o => o.id === tempOffer.id);
+                    if (idx !== -1 && response.result?.id) offers[idx].id = response.result.id;
+                    await refreshOffers();
+                    if (activeTab === 'offers') renderActiveTab();
+                } catch (err) {
+                    console.error('Failed to create offer:', err);
+                    offers = offers.filter(o => o.id !== tempOffer.id);
+                    renderActiveTab();
+                    ui.showToast((getLanguage() === 'ar' ? 'فشل إضافة العرض: ' : 'Failed to create offer: ') + err.message, 'error');
+                }
+            }
+        },
+        { text: t('cancel'), type: 'secondary', onClick: ui.closeModal }
+    ]);
+}
+
+async function handleRestDeleteOffer(offer) {
+    if (confirm(getLanguage() === 'ar' ? `هل أنت متأكد من حذف العرض "${offer.name}"؟` : `Delete offer "${offer.name}"?`)) {
+        const original = [...offers];
+        offers = offers.filter(o => o.id !== offer.id);
+        renderActiveTab();
+        try {
+            await apiFetch(`/api/v1/offers/${offer.id}`, { method: 'DELETE' });
+            ui.showToast(getLanguage() === 'ar' ? 'تم حذف العرض بنجاح' : 'Offer deleted successfully', 'success');
+            await refreshOffers();
+            if (activeTab === 'offers') renderActiveTab();
+        } catch (err) {
+            console.error('Failed to delete offer:', err);
+            ui.showToast((getLanguage() === 'ar' ? 'فشل حذف العرض: ' : 'Failed to delete offer: ') + err.message, 'error');
+            offers = original;
+            renderActiveTab();
+        }
+    }
+}
+
+/* ==========================================================================
+   Tab 8: My Restaurant Profile
+   ========================================================================== */
 function renderProfileTab(parent) {
     parent.replaceChildren();
 
@@ -3378,46 +3698,6 @@ function renderProfileTab(parent) {
     bSwLabel.appendChild(busyStatusText);
     busyBox.appendChild(bSwLabel);
     statusGrid.appendChild(busyBox);
-
-    // 2. Emergency Store Closure Toggle (الإغلاق الاضطراري المؤقت)
-    const isCurrentlyClosed = (user.active === 0 || user.active === false);
-    const closureBox = ui.createElement('div', [], { style: 'padding: 1.1rem 1.25rem; background: rgba(255, 71, 87, 0.08); border: 1px solid rgba(255, 71, 87, 0.25); border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between; gap: 0.75rem;' });
-
-    const closureHeader = ui.createElement('div', []);
-    closureHeader.appendChild(ui.createElementWithText('strong', t('rest_sched_closure_title'), [], { style: 'display: block; font-size: 0.95rem; color: var(--color-danger); margin-bottom: 0.25rem;' }));
-    closureHeader.appendChild(ui.createElementWithText('span', t('rest_sched_closure_desc'), ['text-secondary'], { style: 'font-size: 0.8rem;' }));
-    closureBox.appendChild(closureHeader);
-
-    const cSwLabel = ui.createElement('label', ['switch-container'], { style: 'display: inline-flex; align-items: center; gap: 0.75rem; cursor: pointer;' });
-    const cSwInput = ui.createElement('input', ['switch-input', 'switch-danger'], {
-        type: 'checkbox',
-        checked: isCurrentlyClosed ? 'checked' : ''
-    });
-    const closureStatusText = ui.createElementWithText('span', isCurrentlyClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off'), [], { style: 'font-weight: 700; font-size: 0.9rem;' });
-
-    cSwInput.addEventListener('change', async (e) => {
-        cSwInput.disabled = true;
-        try {
-            await toggleActivityStatus();
-            const updatedUser = JSON.parse(localStorage.getItem('qs_vendor_user') || '{}');
-            const nowClosed = (updatedUser.active === 0 || updatedUser.active === false);
-            closureStatusText.textContent = nowClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off');
-            ui.showToast(nowClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off'), nowClosed ? 'warning' : 'success');
-        } catch (err) {
-            console.error('Failed to toggle activity status:', err);
-            ui.showToast(t('error_generic') + ': ' + err.message, 'error');
-            e.target.checked = !e.target.checked;
-        } finally {
-            cSwInput.disabled = false;
-        }
-    });
-
-    const cSlider = ui.createElement('span', ['switch-slider']);
-    cSwLabel.appendChild(cSwInput);
-    cSwLabel.appendChild(cSlider);
-    cSwLabel.appendChild(closureStatusText);
-    closureBox.appendChild(cSwLabel);
-    statusGrid.appendChild(closureBox);
 
     statusPanel.appendChild(statusGrid);
     wrapper.appendChild(statusPanel);
@@ -3505,15 +3785,26 @@ function renderProfileTab(parent) {
             const daysContainer = ui.createElement('div', [], { style: 'display: flex; flex-wrap: wrap; gap: 0.3rem;' });
             const activeDays = Array.isArray(item.daysOfWeek) ? item.daysOfWeek : [];
             const orderedDays = [6, 0, 1, 2, 3, 4, 5];
-            orderedDays.forEach((d) => {
-                const isActive = activeDays.includes(d);
-                const dayPill = ui.createElementWithText('span', getDayName(d), [], {
-                    style: isActive
-                        ? 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.72rem; font-weight: 600;'
-                        : 'background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.3); padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.72rem; text-decoration: line-through;'
+            const filteredActiveDays = orderedDays.filter(d => activeDays.includes(d));
+
+            if (filteredActiveDays.length === 7) {
+                const allPill = ui.createElementWithText('span', isAr ? '🌍 طوال أيام الأسبوع' : '🌍 All Week Days', [], {
+                    style: 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600;'
                 });
-                daysContainer.appendChild(dayPill);
-            });
+                daysContainer.appendChild(allPill);
+            } else if (filteredActiveDays.length > 0) {
+                filteredActiveDays.forEach((d) => {
+                    const dayPill = ui.createElementWithText('span', getDayName(d), [], {
+                        style: 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.72rem; font-weight: 600;'
+                    });
+                    daysContainer.appendChild(dayPill);
+                });
+            } else {
+                const emptyPill = ui.createElementWithText('span', isAr ? 'لا توجد أيام محددة' : 'No days selected', ['text-secondary'], {
+                    style: 'font-size: 0.75rem; font-style: italic;'
+                });
+                daysContainer.appendChild(emptyPill);
+            }
 
             daysWrapper.appendChild(daysContainer);
             card.appendChild(daysWrapper);
@@ -3525,13 +3816,9 @@ function renderProfileTab(parent) {
     schedPanel.appendChild(gridContainer);
     wrapper.appendChild(schedPanel);
 
-    if (schedulesLoaded) {
-        renderGridContent();
-        refreshSchedules().then(() => renderGridContent());
-    } else {
-        ui.renderShimmerGrid(gridContainer);
-        refreshSchedules().then(() => renderGridContent());
-    }
+    // Fetch Live Schedules from API
+    ui.renderShimmerGrid(gridContainer);
+    refreshSchedules().then(() => renderGridContent());
 
     // ── SECTION 3: Basic Profile Information (البيانات الأساسية للمطعم) ──
     const infoPanel = ui.createElement('div', ['glass-panel'], { style: 'padding: 1.5rem;' });
@@ -3685,44 +3972,6 @@ function renderProfileTab(parent) {
     });
 
     wrapper.appendChild(infoPanel);
-    daysWrap.appendChild(selectDays);
-    schedPanel.appendChild(daysWrap);
-
-    const hoursWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1.25rem;' });
-    hoursWrap.appendChild(ui.createElementWithText('label', t('rest_sched_hours_window_label'), [], { style: 'font-size: 0.85rem; font-weight: 600;' }));
-    const inputHours = ui.createElement('input', ['search-input'], {
-        type: 'text',
-        value: settings.hours || '',
-        placeholder: 'e.g. 12:00 PM - 11:30 PM'
-    });
-    hoursWrap.appendChild(inputHours);
-    schedPanel.appendChild(hoursWrap);
-
-    const saveSchedBtn = ui.createElementWithText('button', t('rest_sched_hours_btn'), ['btn', 'btn-primary'], { style: 'align-self: flex-start;' });
-    const schedFeedback = ui.createElement('span', [], { style: 'font-size: 0.85rem; margin-left: 1rem;' });
-    const schedFooter = ui.createElement('div', [], { style: 'display: flex; align-items: center;' });
-    schedFooter.appendChild(saveSchedBtn);
-    schedFooter.appendChild(schedFeedback);
-    schedPanel.appendChild(schedFooter);
-
-    saveSchedBtn.addEventListener('click', async () => {
-        const freshNow = getUserSettings();
-        saveSchedBtn.disabled = true;
-        try {
-            await updateUserSettings(selectDays.value, inputHours.value, freshNow.settings.description);
-            schedFeedback.textContent = '✅ ' + t('rest_sched_hours_saved');
-            schedFeedback.style.color = 'var(--color-success)';
-            setTimeout(() => { schedFeedback.textContent = ''; }, 2500);
-        } catch (err) {
-            console.error('Failed to save hours:', err);
-            schedFeedback.textContent = '❌ ' + (t('error_generic') + ': ' + err.message);
-            schedFeedback.style.color = 'var(--color-danger)';
-        } finally {
-            saveSchedBtn.disabled = false;
-        }
-    });
-
-    wrapper.appendChild(schedPanel);
     parent.appendChild(wrapper);
 }
 

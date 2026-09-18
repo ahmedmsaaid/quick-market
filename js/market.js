@@ -9,6 +9,7 @@ import * as ui from './ui-utils.js?v=29.0';
 import { t, getLanguage, setLanguage, initTranslations, subscribeLangChange } from './translations.js';
 import { ApiClient, ImageService, Logger } from './core.js';
 import { initFCMNotificationService } from './fcm-helper.js';
+import { initSignalRNotificationService, stopSignalRConnection } from './signalr-helper.js';
 console.log('🛒 market.js module loaded');
 
 function clearInvalid(inputEl) {
@@ -704,14 +705,25 @@ export async function initMarket() {
         await refreshOrders();
         updateBadges();
         checkBuzzerAlarm();
-        if (activeTab === 'queue' || activeTab === 'progress') {
+        if (activeTab === 'orders' || activeTab === 'queue' || activeTab === 'progress') {
+            renderActiveTab();
+        }
+    });
+
+    // Initialize SignalR Real-Time Notifications
+    initSignalRNotificationService(apiClient, async (notification) => {
+        await refreshOrders();
+        updateBadges();
+        checkBuzzerAlarm();
+        if (activeTab === 'orders' || activeTab === 'queue' || activeTab === 'progress') {
             renderActiveTab();
         }
     });
 
     const logoutBtn = document.getElementById('btn-logout');
     if (logoutBtn) {
-        logoutBtn.addEventListener('click', () => {
+        logoutBtn.addEventListener('click', async () => {
+            await stopSignalRConnection();
             localStorage.removeItem('qs_vendor_token');
             localStorage.removeItem('qs_vendor_user');
             window.location.replace('login.html?role=market');
@@ -1223,22 +1235,22 @@ function showAddProductModal() {
     row2.appendChild(priceWrap);
     row2.appendChild(qtyWrap);
 
-    // Discount dropdown
-    const discountWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
-    discountWrap.appendChild(ui.createElementWithText('label', t('rest_add_modal_discount'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
-    const discountSel = ui.createElement('select', ['select-input']);
-    discountSel.appendChild(ui.createElementWithText('option', t('rest_add_modal_no_discount'), [], { value: '' }));
-    discounts.forEach(d => discountSel.appendChild(ui.createElementWithText('option', `${d.name} (${d.percentage}%)`, [], { value: d.id.toString() })));
-    discountWrap.appendChild(discountSel);
+    // 3.5 Discount Control
+    const discountCtrl = buildProductDiscountControl([], 0, 0, 1);
+    priceIn.addEventListener('input', () => discountCtrl.updatePreview(priceIn.value));
+    discountCtrl.element.addEventListener('change', () => discountCtrl.updatePreview(priceIn.value));
+    discountCtrl.element.addEventListener('input', () => discountCtrl.updatePreview(priceIn.value));
 
-    // Image
+    // Image upload
     const imgWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
     imgWrap.appendChild(ui.createElementWithText('label', t('mkt_add_modal_image'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
     const imgRow = ui.createElement('div', [], { style: 'display: flex; gap: 1rem; align-items: center;' });
     const imgInput = ui.createElement('input', [], { type: 'file', accept: 'image/*', style: 'display: none;' });
     const uploadImgBtn = ui.createElementWithText('button', getLanguage() === 'ar' ? 'اختر صورة' : 'Choose Image', ['btn', 'btn-secondary']);
     uploadImgBtn.addEventListener('click', () => imgInput.click());
-    const previewImg = ui.createElement('img', [], { style: 'width: 50px; height: 50px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); object-fit: cover; display: none;' });
+    const previewImg = ui.createElement('img', [], {
+        style: 'width: 50px; height: 50px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); object-fit: cover; display: none;'
+    });
     let uploadedPhotoKey = '';
     imgInput.addEventListener('change', async (e) => {
         const file = e.target.files[0];
@@ -1248,23 +1260,23 @@ function showAddProductModal() {
             try {
                 const result = await uploadImage(file);
                 if (result) { uploadedPhotoKey = result; previewImg.src = getImageUrl(uploadedPhotoKey); }
-            } catch (_) { ui.showToast(getLanguage() === 'ar' ? 'فشل رفع الصورة' : 'Failed to upload image', 'error'); }
+            } catch (_) {
+                ui.showToast(getLanguage() === 'ar' ? 'فشل رفع الصورة' : 'Failed to upload image', 'error');
+            }
         }
     });
     imgRow.appendChild(uploadImgBtn);
     imgRow.appendChild(imgInput);
     imgRow.appendChild(previewImg);
     imgWrap.appendChild(imgRow);
-    const imgHint = ui.createElementWithText('span', getLanguage() === 'ar' ? 'الأبعاد الموصى بها: 600 × 600 بكسل (نسبة 1:1)' : 'Recommended dimensions: 600 × 600 px (1:1)', [], { style: 'font-size: 0.75rem; color: var(--text-muted); display: block; margin-top: 0.25rem;' });
-    imgWrap.appendChild(imgHint);
 
-    // Availability
+    // Availability switch
     const availLabel = ui.createElement('label', ['switch-container'], { style: 'margin-top: 0.5rem;' });
     const availInput = ui.createElement('input', ['switch-input'], { type: 'checkbox', checked: 'true' });
     const availSlider = ui.createElement('div', ['switch-slider']);
     availLabel.appendChild(availInput);
     availLabel.appendChild(availSlider);
-    availLabel.appendChild(ui.createElementWithText('span', t('mkt_add_modal_available'), [], { style: 'font-size: 0.85rem;' }));
+    availLabel.appendChild(ui.createElementWithText('span', t('rest_add_modal_available'), [], { style: 'font-size: 0.85rem;' }));
     availInput.addEventListener('change', (e) => {
         qtyIn.disabled = !e.target.checked;
         if (!e.target.checked) qtyIn.value = '0';
@@ -1274,7 +1286,7 @@ function showAddProductModal() {
     form.appendChild(row1);
     form.appendChild(descWrap);
     form.appendChild(row2);
-    form.appendChild(discountWrap);
+    form.appendChild(discountCtrl.element);
     form.appendChild(imgWrap);
     form.appendChild(availLabel);
 
@@ -1314,11 +1326,13 @@ function showAddProductModal() {
                 const selectedCatName = catSel.value;
                 const matchedCat = categories.find(c => c.name === selectedCatName);
                 const categoryId = matchedCat ? matchedCat.id : 0;
+                const resolvedDiscountIds = await discountCtrl.resolveDiscountIds();
+
                 // Optimistic add
                 const tempItem = {
                     id: 'temp-' + Date.now(), name, price, category: selectedCatName,
                     description, isOutOfStock: !availInput.checked || quantity === 0,
-                    image: uploadedPhotoKey, rawProduct: { quantity, discountIds: discountSel.value ? [parseInt(discountSel.value)] : [] }
+                    image: uploadedPhotoKey, rawProduct: { quantity, discountIds: resolvedDiscountIds }
                 };
                 marketProducts.push(tempItem);
                 renderActiveTab();
@@ -1331,7 +1345,7 @@ function showAddProductModal() {
                             id: 0, name, photo: uploadedPhotoKey, description,
                             quantity, limit: false, price, size: null, type: 1,
                             categoryId, creatorId: myMarketId || 0,
-                            discountIds: discountSel.value ? [parseInt(discountSel.value)] : []
+                            discountIds: resolvedDiscountIds
                         })
                     });
                     ui.showToast(getLanguage() === 'ar' ? 'تمت إضافة المنتج بنجاح' : 'Product added successfully', 'success');
@@ -1347,6 +1361,75 @@ function showAddProductModal() {
         },
         { text: t('cancel'), type: 'secondary', onClick: ui.closeModal }
     ]);
+}
+
+function buildProductDiscountControl(currentDiscountIds, currentDiscountPct, initialPrice, typeNum = 1) {
+    const isAr = getLanguage() === 'ar';
+    const wrap = ui.createElement('div', [], {
+        style: 'background: rgba(0,0,0,0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem;'
+    });
+
+    const header = ui.createElementWithText('label', isAr ? '🏷️ الخصم / العرض (اختياري)' : '🏷️ Discount & Offer (Optional)', [], {
+        style: 'font-weight: 600; font-size: 0.85rem; color: var(--text-primary);'
+    });
+    wrap.appendChild(header);
+
+    // Dropdown for existing discounts only
+    const select = ui.createElement('select', ['select-input'], { style: 'width: 100%; font-size: 0.85rem;' });
+    select.appendChild(ui.createElementWithText('option', isAr ? '-- بدون خصم --' : '-- No Discount --', [], { value: '' }));
+
+    let activeId = '';
+    if (currentDiscountIds && currentDiscountIds.length > 0) {
+        activeId = currentDiscountIds[0].toString();
+    } else if (currentDiscountPct && discounts.length > 0) {
+        const found = discounts.find(d => d.percentage === currentDiscountPct);
+        if (found) activeId = found.id.toString();
+    }
+
+    discounts.forEach(d => {
+        const opt = ui.createElementWithText('option', `${d.name} (${d.percentage}%)`, [], { value: d.id.toString() });
+        if (d.id.toString() === activeId) opt.selected = true;
+        select.appendChild(opt);
+    });
+    wrap.appendChild(select);
+
+    // Live preview element
+    const previewEl = ui.createElement('div', [], {
+        style: 'font-size: 0.8rem; color: var(--brand-teal); font-weight: 600; display: none; margin-top: 0.25rem;'
+    });
+    wrap.appendChild(previewEl);
+
+    function updatePreview(price) {
+        let pct = 0;
+        if (select.value) {
+            const found = discounts.find(d => d.id.toString() === select.value);
+            if (found) pct = found.percentage;
+        }
+
+        const basePrice = parseFloat(price) || 0;
+        if (pct > 0 && basePrice > 0) {
+            const finalPrice = (basePrice * (1 - pct / 100)).toFixed(2);
+            previewEl.textContent = isAr
+                ? `⚡ السعر بعد الخصم: ${finalPrice} (${pct}% خصم)`
+                : `⚡ Price after discount: ${finalPrice} (${pct}% OFF)`;
+            previewEl.style.display = 'block';
+        } else {
+            previewEl.style.display = 'none';
+        }
+    }
+
+    async function resolveDiscountIds() {
+        if (select.value) {
+            return [parseInt(select.value)];
+        }
+        return [];
+    }
+
+    return {
+        element: wrap,
+        updatePreview,
+        resolveDiscountIds
+    };
 }
 
 function showEditProductModal(item) {
@@ -1369,20 +1452,16 @@ function showEditProductModal(item) {
     const qtyIn = ui.createElement('input', ['search-input'], { value: currentQty, type: 'number', style: 'width: 100%', min: '0' });
     modalBody.appendChild(qtyIn);
 
-    // Discount dropdown
-    let activeDiscountId = '';
-    if (item.rawProduct && item.rawProduct.discountIds && item.rawProduct.discountIds.length > 0) {
-        activeDiscountId = item.rawProduct.discountIds[0].toString();
-    }
-    modalBody.appendChild(ui.createElementWithText('label', t('rest_add_modal_discount'), [], { style: 'font-size: 0.85rem;' }));
-    const discountSel = ui.createElement('select', ['select-input'], { style: 'width: 100%' });
-    discountSel.appendChild(ui.createElementWithText('option', t('rest_add_modal_no_discount'), [], { value: '' }));
-    discounts.forEach(d => {
-        const opt = ui.createElementWithText('option', `${d.name} (${d.percentage}%)`, [], { value: d.id.toString() });
-        if (d.id.toString() === activeDiscountId) opt.selected = true;
-        discountSel.appendChild(opt);
-    });
-    modalBody.appendChild(discountSel);
+    // Discount control
+    const currentDiscountIds = item.rawProduct ? item.rawProduct.discountIds : [];
+    const currentDiscountPct = item.rawProduct ? item.rawProduct.discountPercentage : 0;
+    const discountCtrl = buildProductDiscountControl(currentDiscountIds, currentDiscountPct, item.price, 1);
+    modalBody.appendChild(discountCtrl.element);
+
+    priceIn.addEventListener('input', () => discountCtrl.updatePreview(priceIn.value));
+    discountCtrl.element.addEventListener('change', () => discountCtrl.updatePreview(priceIn.value));
+    discountCtrl.element.addEventListener('input', () => discountCtrl.updatePreview(priceIn.value));
+    discountCtrl.updatePreview(priceIn.value);
 
     // Category dropdown
     modalBody.appendChild(ui.createElementWithText('label', t('mkt_add_modal_category'), [], { style: 'font-size: 0.85rem;' }));
@@ -1463,10 +1542,12 @@ function showEditProductModal(item) {
                 const selectedCatName = catSel.value;
                 const matchedCat = categories.find(c => c.name === selectedCatName);
                 const categoryId = matchedCat ? matchedCat.id : (item.rawProduct ? item.rawProduct.categoryId : 0);
+                const resolvedDiscountIds = await discountCtrl.resolveDiscountIds();
+
                 const originalProducts = [...marketProducts];
                 const index = marketProducts.findIndex(p => p.id === item.id);
                 if (index !== -1) {
-                    marketProducts[index] = { ...marketProducts[index], name: newName, price: newPrice, category: selectedCatName, description: newDescText, image: uploadedPhotoKey, isOutOfStock: quantity === 0, rawProduct: { ...marketProducts[index].rawProduct, quantity, discountIds: discountSel.value ? [parseInt(discountSel.value)] : [] } };
+                    marketProducts[index] = { ...marketProducts[index], name: newName, price: newPrice, category: selectedCatName, description: newDescText, image: uploadedPhotoKey, isOutOfStock: quantity === 0, rawProduct: { ...marketProducts[index].rawProduct, quantity, discountIds: resolvedDiscountIds } };
                     renderActiveTab();
                 }
                 ui.closeModal();
@@ -1479,7 +1560,7 @@ function showEditProductModal(item) {
                             description: newDescText, quantity, limit: false, price: newPrice,
                             size: null, type: 1, categoryId,
                             creatorId: item.rawProduct ? item.rawProduct.creatorId : (myMarketId || 0),
-                            discountIds: discountSel.value ? [parseInt(discountSel.value)] : []
+                            discountIds: resolvedDiscountIds
                         })
                     });
                     ui.showToast(getLanguage() === 'ar' ? 'تم تحديث المنتج بنجاح' : 'Product updated successfully', 'success');
@@ -2796,46 +2877,6 @@ function renderProfileTab(parent) {
     busyBox.appendChild(bSwLabel);
     statusGrid.appendChild(busyBox);
 
-    // 2. Emergency Store Closure Toggle (الإغلاق الاضطراري المؤقت)
-    const isCurrentlyClosed = (user.active === 0 || user.active === false);
-    const closureBox = ui.createElement('div', [], { style: 'padding: 1.1rem 1.25rem; background: rgba(255, 71, 87, 0.08); border: 1px solid rgba(255, 71, 87, 0.25); border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between; gap: 0.75rem;' });
-
-    const closureHeader = ui.createElement('div', []);
-    closureHeader.appendChild(ui.createElementWithText('strong', t('rest_sched_closure_title'), [], { style: 'display: block; font-size: 0.95rem; color: var(--color-danger); margin-bottom: 0.25rem;' }));
-    closureHeader.appendChild(ui.createElementWithText('span', t('rest_sched_closure_desc'), ['text-secondary'], { style: 'font-size: 0.8rem;' }));
-    closureBox.appendChild(closureHeader);
-
-    const cSwLabel = ui.createElement('label', ['switch-container'], { style: 'display: inline-flex; align-items: center; gap: 0.75rem; cursor: pointer;' });
-    const cSwInput = ui.createElement('input', ['switch-input', 'switch-danger'], {
-        type: 'checkbox',
-        checked: isCurrentlyClosed ? 'checked' : ''
-    });
-    const closureStatusText = ui.createElementWithText('span', isCurrentlyClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off'), [], { style: 'font-weight: 700; font-size: 0.9rem;' });
-
-    cSwInput.addEventListener('change', async (e) => {
-        cSwInput.disabled = true;
-        try {
-            await toggleActivityStatus();
-            const updatedUser = JSON.parse(localStorage.getItem('qs_vendor_user') || '{}');
-            const nowClosed = (updatedUser.active === 0 || updatedUser.active === false);
-            closureStatusText.textContent = nowClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off');
-            ui.showToast(nowClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off'), nowClosed ? 'warning' : 'success');
-        } catch (err) {
-            console.error('Failed to toggle activity status:', err);
-            ui.showToast(t('error_generic') + ': ' + err.message, 'error');
-            e.target.checked = !e.target.checked;
-        } finally {
-            cSwInput.disabled = false;
-        }
-    });
-
-    const cSlider = ui.createElement('span', ['switch-slider']);
-    cSwLabel.appendChild(cSwInput);
-    cSwLabel.appendChild(cSlider);
-    cSwLabel.appendChild(closureStatusText);
-    closureBox.appendChild(cSwLabel);
-    statusGrid.appendChild(closureBox);
-
     statusPanel.appendChild(statusGrid);
     wrapper.appendChild(statusPanel);
 
@@ -2922,15 +2963,26 @@ function renderProfileTab(parent) {
             const daysContainer = ui.createElement('div', [], { style: 'display: flex; flex-wrap: wrap; gap: 0.3rem;' });
             const activeDays = Array.isArray(item.daysOfWeek) ? item.daysOfWeek : [];
             const orderedDays = [6, 0, 1, 2, 3, 4, 5];
-            orderedDays.forEach((d) => {
-                const isActive = activeDays.includes(d);
-                const dayPill = ui.createElementWithText('span', getDayName(d), [], {
-                    style: isActive
-                        ? 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.72rem; font-weight: 600;'
-                        : 'background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.3); padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.72rem; text-decoration: line-through;'
+            const filteredActiveDays = orderedDays.filter(d => activeDays.includes(d));
+
+            if (filteredActiveDays.length === 7) {
+                const allPill = ui.createElementWithText('span', isAr ? '🌍 طوال أيام الأسبوع' : '🌍 All Week Days', [], {
+                    style: 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600;'
                 });
-                daysContainer.appendChild(dayPill);
-            });
+                daysContainer.appendChild(allPill);
+            } else if (filteredActiveDays.length > 0) {
+                filteredActiveDays.forEach((d) => {
+                    const dayPill = ui.createElementWithText('span', getDayName(d), [], {
+                        style: 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.72rem; font-weight: 600;'
+                    });
+                    daysContainer.appendChild(dayPill);
+                });
+            } else {
+                const emptyPill = ui.createElementWithText('span', isAr ? 'لا توجد أيام محددة' : 'No days selected', ['text-secondary'], {
+                    style: 'font-size: 0.75rem; font-style: italic;'
+                });
+                daysContainer.appendChild(emptyPill);
+            }
 
             daysWrapper.appendChild(daysContainer);
             card.appendChild(daysWrapper);
@@ -2942,13 +2994,9 @@ function renderProfileTab(parent) {
     schedPanel.appendChild(gridContainer);
     wrapper.appendChild(schedPanel);
 
-    if (schedulesLoaded) {
-        renderGridContent();
-        refreshSchedules().then(() => renderGridContent());
-    } else {
-        ui.renderShimmerGrid(gridContainer);
-        refreshSchedules().then(() => renderGridContent());
-    }
+    // Fetch Live Schedules from API
+    ui.renderShimmerGrid(gridContainer);
+    refreshSchedules().then(() => renderGridContent());
 
     // ── SECTION 3: Basic Profile Information (البيانات الأساسية للمتجر) ──
     const infoPanel = ui.createElement('div', ['glass-panel'], { style: 'padding: 1.5rem;' });
@@ -3968,16 +4016,51 @@ async function openDashboardChat(recipientId, recipientName) {
 /* ==========================================================================
    Tab: Working Hours Schedule (REST API /api/v1/schedules)
    ========================================================================== */
+function normalizeSchedule(raw) {
+    if (!raw) return null;
+    const id = raw.id != null ? Number(raw.id) : (raw.Id != null ? Number(raw.Id) : 0);
+    const startTime = (raw.startTime || raw.StartTime || '09:00:00').toString();
+    const endTime = (raw.endTime || raw.EndTime || '23:00:00').toString();
+    const type = raw.type != null ? Number(raw.type) : (raw.Type != null ? Number(raw.Type) : 1);
+
+    let days = [];
+    const rawDays = raw.daysOfWeek ?? raw.DaysOfWeek;
+    if (Array.isArray(rawDays)) {
+        days = rawDays.map(d => Number(d)).filter(d => !isNaN(d) && d >= 0 && d <= 6);
+    } else if (typeof rawDays === 'string') {
+        try {
+            const parsed = JSON.parse(rawDays);
+            if (Array.isArray(parsed)) {
+                days = parsed.map(d => Number(d)).filter(d => !isNaN(d) && d >= 0 && d <= 6);
+            }
+        } catch (_) {}
+    }
+
+    days = Array.from(new Set(days)).sort((a, b) => a - b);
+
+    return {
+        id,
+        startTime,
+        endTime,
+        type,
+        daysOfWeek: days,
+        creatorId: raw.creatorId ?? raw.CreatorId ?? null
+    };
+}
+
 async function refreshSchedules() {
     try {
         const userJson = localStorage.getItem('qs_vendor_user');
         let creatorId = null;
-        try { if (userJson) creatorId = JSON.parse(userJson).id || null; } catch (_) {}
+        try {
+            if (userJson) {
+                const u = JSON.parse(userJson);
+                creatorId = u.id != null ? Number(u.id) : null;
+            }
+        } catch (_) {}
 
         const bodyObj = { pageNumber: 1, pageSize: 100, enablePagination: false };
         if (creatorId) {
-            bodyObj.creatorId = creatorId;
-            bodyObj.filter = { creatorId: creatorId };
             bodyObj.filters = { creatorId: creatorId };
         }
 
@@ -3985,19 +4068,25 @@ async function refreshSchedules() {
             method: 'PATCH',
             body: JSON.stringify(bodyObj)
         });
-        if (res && res.success) {
-            let list = [];
-            if (Array.isArray(res.result)) list = res.result;
-            else if (res.result && Array.isArray(res.result.items)) list = res.result.items;
-            else if (res.result && Array.isArray(res.result.data)) list = res.result.data;
-            schedules = list;
-            schedulesLoaded = true;
-            return schedules;
-        } else {
-            schedules = [];
-            schedulesLoaded = true;
-            return [];
+        
+        let list = [];
+        if (res) {
+            if (Array.isArray(res)) {
+                list = res;
+            } else if (res.result) {
+                if (Array.isArray(res.result)) list = res.result;
+                else if (Array.isArray(res.result.items)) list = res.result.items;
+                else if (Array.isArray(res.result.data)) list = res.result.data;
+            } else if (Array.isArray(res.data)) {
+                list = res.data;
+            } else if (Array.isArray(res.items)) {
+                list = res.items;
+            }
         }
+
+        schedules = list.map(normalizeSchedule).filter(Boolean);
+        schedulesLoaded = true;
+        return schedules;
     } catch (err) {
         console.error('Failed to fetch schedules:', err);
         schedules = [];
@@ -4028,7 +4117,7 @@ async function deleteScheduleApi(id) {
 
 function formatScheduleTime(timeStr) {
     if (!timeStr) return '--:--';
-    const parts = timeStr.split(':');
+    const parts = timeStr.toString().split(':');
     if (parts.length < 2) return timeStr;
     let h = parseInt(parts[0], 10);
     const m = parts[1];
@@ -4061,50 +4150,6 @@ function renderScheduleTab(parent) {
     topBar.appendChild(addBtn);
 
     mainWrapper.appendChild(topBar);
-
-    // Emergency Closure Banner / Toggle Row
-    const userJsonNow = localStorage.getItem(apiClient.getUserKey());
-    const uNow = JSON.parse(userJsonNow || '{}');
-    const isCurrentlyClosed = (uNow.active === 0 || uNow.active === false);
-
-    const closurePanel = ui.createElement('div', [], { style: 'padding: 1.25rem 1.5rem; background: rgba(255, 71, 87, 0.05); border: 1px solid rgba(255, 71, 87, 0.2); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;' });
-    
-    const closureText = ui.createElement('div', []);
-    closureText.appendChild(ui.createElementWithText('strong', t('rest_sched_closure_title'), [], { style: 'display: block; font-size: 0.95rem; color: var(--color-danger); margin-bottom: 0.2rem;' }));
-    closureText.appendChild(ui.createElementWithText('span', t('rest_sched_closure_desc'), ['text-secondary'], { style: 'font-size: 0.82rem;' }));
-    closurePanel.appendChild(closureText);
-
-    const switchLabel = ui.createElement('label', ['switch-container'], { style: 'display: inline-flex; align-items: center; gap: 0.75rem; cursor: pointer;' });
-    const switchInput = ui.createElement('input', ['switch-input', 'switch-danger'], {
-        type: 'checkbox',
-        checked: isCurrentlyClosed ? 'checked' : ''
-    });
-    
-    const closureStatusText = ui.createElementWithText('span', isCurrentlyClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off'), [], { style: 'font-weight: 700; font-size: 0.9rem;' });
-
-    switchInput.addEventListener('change', async (e) => {
-        switchInput.disabled = true;
-        try {
-            await toggleActivityStatus();
-            const updatedUser = JSON.parse(localStorage.getItem(apiClient.getUserKey()) || '{}');
-            const nowClosed = (updatedUser.active === 0 || updatedUser.active === false);
-            closureStatusText.textContent = nowClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off');
-            ui.showToast(nowClosed ? t('rest_sched_closure_on') : t('rest_sched_closure_off'), nowClosed ? 'warning' : 'success');
-        } catch (err) {
-            console.error('Failed to toggle activity status:', err);
-            ui.showToast(t('error_generic') + ': ' + err.message, 'error');
-            e.target.checked = !e.target.checked;
-        } finally {
-            switchInput.disabled = false;
-        }
-    });
-
-    const slider = ui.createElement('span', ['switch-slider']);
-    switchLabel.appendChild(switchInput);
-    switchLabel.appendChild(slider);
-    switchLabel.appendChild(closureStatusText);
-    closurePanel.appendChild(switchLabel);
-    mainWrapper.appendChild(closurePanel);
 
     // Schedule Cards Grid Container
     const gridContainer = ui.createElement('div', [], { style: 'display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.25rem; width: 100%;' });
@@ -4170,7 +4215,7 @@ function renderScheduleTab(parent) {
             timeBox.appendChild(ui.createElementWithText('span', `${formatScheduleTime(item.startTime)} — ${formatScheduleTime(item.endTime)}`, [], { style: 'font-weight: 700; font-size: 1.05rem; letter-spacing: 0.3px;' }));
             card.appendChild(timeBox);
 
-            // Operating Days Pills
+            // Operating Days Pills (Show only active days)
             const daysWrapper = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.4rem;' });
             daysWrapper.appendChild(ui.createElementWithText('span', t('sched_days_label') + ':', ['text-secondary'], { style: 'font-size: 0.8rem;' }));
 
@@ -4178,15 +4223,26 @@ function renderScheduleTab(parent) {
             
             const activeDays = Array.isArray(item.daysOfWeek) ? item.daysOfWeek : [];
             const orderedDays = [6, 0, 1, 2, 3, 4, 5];
-            orderedDays.forEach((d) => {
-                const isActive = activeDays.includes(d);
-                const dayPill = ui.createElementWithText('span', getDayName(d), [], {
-                    style: isActive
-                        ? 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.2rem 0.55rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600;'
-                        : 'background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.3); padding: 0.2rem 0.55rem; border-radius: 12px; font-size: 0.75rem; text-decoration: line-through;'
+            const filteredActiveDays = orderedDays.filter(d => activeDays.includes(d));
+
+            if (filteredActiveDays.length === 7) {
+                const allPill = ui.createElementWithText('span', isAr ? '🌍 طوال أيام الأسبوع' : '🌍 All Week Days', [], {
+                    style: 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.25rem 0.65rem; border-radius: 12px; font-size: 0.78rem; font-weight: 600;'
                 });
-                daysContainer.appendChild(dayPill);
-            });
+                daysContainer.appendChild(allPill);
+            } else if (filteredActiveDays.length > 0) {
+                filteredActiveDays.forEach((d) => {
+                    const dayPill = ui.createElementWithText('span', getDayName(d), [], {
+                        style: 'background: var(--color-primary, #00796B); color: #ffffff; padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.78rem; font-weight: 600;'
+                    });
+                    daysContainer.appendChild(dayPill);
+                });
+            } else {
+                const emptyPill = ui.createElementWithText('span', isAr ? 'لا توجد أيام محددة' : 'No days selected', ['text-secondary'], {
+                    style: 'font-size: 0.78rem; font-style: italic;'
+                });
+                daysContainer.appendChild(emptyPill);
+            }
 
             daysWrapper.appendChild(daysContainer);
             card.appendChild(daysWrapper);
@@ -4198,19 +4254,17 @@ function renderScheduleTab(parent) {
     mainWrapper.appendChild(gridContainer);
     parent.appendChild(mainWrapper);
 
-    // Initial Data Fetch
-    if (schedulesLoaded) {
-        renderGridContent();
-        refreshSchedules().then(() => renderGridContent());
-    } else {
-        ui.renderShimmerGrid(gridContainer);
-        refreshSchedules().then(() => renderGridContent());
-    }
+    // Fetch Live Schedules from API
+    ui.renderShimmerGrid(gridContainer);
+    refreshSchedules().then(() => renderGridContent());
 }
 
 function showScheduleModal(existingItem = null, onSuccessCallback = null) {
     const isAr = getLanguage() === 'ar';
-    const titleStr = existingItem ? (isAr ? '✏️ تعديل الموعد' : '✏️ Edit Schedule') : (isAr ? '➕ إضافة موعد جديد' : '➕ Add New Schedule');
+    const normExisting = existingItem ? normalizeSchedule(existingItem) : null;
+    const isEdit = Boolean(normExisting && normExisting.id);
+
+    const titleStr = isEdit ? (isAr ? '✏️ تعديل الموعد' : '✏️ Edit Schedule') : (isAr ? '➕ إضافة موعد جديد' : '➕ Add New Schedule');
     const modalContent = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 1.25rem; width: 100%; max-width: 480px;' });
 
     // Helpful Tip Banner
@@ -4229,12 +4283,14 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
     const optClosed = ui.createElementWithText('option', t('sched_type_closed'), [], { value: '2' });
     typeSelect.appendChild(optWorking);
     typeSelect.appendChild(optClosed);
-    typeSelect.value = existingItem ? String(existingItem.type || 1) : '1';
+    typeSelect.value = normExisting ? String(normExisting.type || 1) : '1';
     typeGroup.appendChild(typeSelect);
     modalContent.appendChild(typeGroup);
 
     // 2. Days Multi-Select
-    let selectedDays = existingItem && Array.isArray(existingItem.daysOfWeek) ? [...existingItem.daysOfWeek] : [6, 0, 1, 2, 3, 4, 5];
+    let selectedDays = normExisting && Array.isArray(normExisting.daysOfWeek) && normExisting.daysOfWeek.length > 0
+        ? [...normExisting.daysOfWeek]
+        : [6, 0, 1, 2, 3, 4, 5];
 
     const daysGroup = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.5rem;' });
     
@@ -4245,7 +4301,7 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
     
     const btnAll = ui.createElementWithText('button', t('sched_select_all'), ['btn', 'btn-link', 'btn-xs'], { type: 'button', style: 'font-size: 0.75rem; text-decoration: underline;' });
     btnAll.addEventListener('click', () => {
-        selectedDays = [0, 1, 2, 3, 4, 5, 6];
+        selectedDays = [6, 0, 1, 2, 3, 4, 5];
         updateDaysUI();
     });
     quickActions.appendChild(btnAll);
@@ -4278,6 +4334,7 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
                     selectedDays = selectedDays.filter(day => day !== d);
                 } else {
                     selectedDays.push(d);
+                    selectedDays.sort((a, b) => a - b);
                 }
                 updateDaysUI();
             });
@@ -4293,8 +4350,10 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
 
     const extractHHMM = (str) => {
         if (!str) return '09:00';
-        const parts = str.split(':');
-        if (parts.length >= 2) return `${parts[0].padStart(2, '0')}:${parts[1].padStart(2, '0')}`;
+        const match = str.toString().match(/(\d{1,2}):(\d{2})/);
+        if (match) {
+            return `${match[1].padStart(2, '0')}:${match[2]}`;
+        }
         return '09:00';
     };
 
@@ -4302,7 +4361,7 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
     startInputBox.appendChild(ui.createElementWithText('label', t('sched_start_time'), [], { style: 'font-size: 0.85rem; font-weight: 600;' }));
     const startTimeInput = ui.createElement('input', ['search-input'], {
         type: 'time',
-        value: existingItem ? extractHHMM(existingItem.startTime) : '09:00'
+        value: normExisting ? extractHHMM(normExisting.startTime) : '09:00'
     });
     startInputBox.appendChild(startTimeInput);
     timesGroup.appendChild(startInputBox);
@@ -4311,7 +4370,7 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
     endInputBox.appendChild(ui.createElementWithText('label', t('sched_end_time'), [], { style: 'font-size: 0.85rem; font-weight: 600;' }));
     const endTimeInput = ui.createElement('input', ['search-input'], {
         type: 'time',
-        value: existingItem ? extractHHMM(existingItem.endTime) : '23:00'
+        value: normExisting ? extractHHMM(normExisting.endTime) : '23:00'
     });
     endInputBox.appendChild(endTimeInput);
     timesGroup.appendChild(endInputBox);
@@ -4339,21 +4398,23 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
         saveBtn.disabled = true;
         saveBtn.textContent = isAr ? 'جاري الحفظ...' : 'Saving...';
 
-        const startTimeFull = startTimeInput.value.length === 5 ? `${startTimeInput.value}:00` : startTimeInput.value;
-        const endTimeFull = endTimeInput.value.length === 5 ? `${endTimeInput.value}:00` : endTimeInput.value;
+        const sVal = startTimeInput.value.trim();
+        const eVal = endTimeInput.value.trim();
+        const startTimeFull = sVal.length === 5 ? `${sVal}:00` : sVal;
+        const endTimeFull = eVal.length === 5 ? `${eVal}:00` : eVal;
 
         const payload = {
             startTime: startTimeFull,
             endTime: endTimeFull,
             type: parseInt(typeSelect.value, 10),
-            daysOfWeek: selectedDays
+            daysOfWeek: selectedDays.map(Number)
         };
-        if (existingItem && existingItem.id) {
-            payload.id = existingItem.id;
+        if (isEdit) {
+            payload.id = Number(normExisting.id);
         }
 
         try {
-            if (existingItem && existingItem.id) {
+            if (isEdit) {
                 await updateSchedule(payload);
                 ui.showToast(isAr ? 'تم تحديث الموعد بنجاح' : 'Schedule updated successfully', 'success');
             } else {
@@ -4365,7 +4426,7 @@ function showScheduleModal(existingItem = null, onSuccessCallback = null) {
             if (onSuccessCallback) onSuccessCallback();
         } catch (err) {
             console.error('Save schedule error:', err);
-            ui.showToast(t('error_generic') + ': ' + err.message, 'error');
+            ui.showToast(t('error_generic') + ': ' + (err.message || err), 'error');
         } finally {
             saveBtn.disabled = false;
             saveBtn.textContent = isAr ? 'حفظ الموعد' : 'Save Schedule';
