@@ -5,11 +5,12 @@
  * Type = 1 (Supermarket)
  */
 
-import * as ui from './ui-utils.js?v=29.0';
-import { t, getLanguage, setLanguage, initTranslations, subscribeLangChange } from './translations.js';
-import { ApiClient, ImageService, Logger } from './core.js';
-import { initFCMNotificationService } from './fcm-helper.js';
-import { initSignalRNotificationService, stopSignalRConnection } from './signalr-helper.js';
+import * as ui from './ui-utils.js?v=35.0';
+import { t, getLanguage, setLanguage, initTranslations, subscribeLangChange } from './translations.js?v=35.0';
+import { ApiClient, ImageService, Logger } from './core.js?v=35.0';
+import { initFCMNotificationService } from './fcm-helper.js?v=35.0';
+import { initSignalRNotificationService, stopSignalRConnection } from './signalr-helper.js?v=35.0';
+import { renderMerchantOverview, renderMerchantSettlements, renderMerchantWallet } from './modules/merchant-financial.js?v=35.0';
 console.log('🛒 market.js module loaded');
 
 function clearInvalid(inputEl) {
@@ -664,7 +665,8 @@ async function initNotificationsSystem() {
     }
 
     await updateNotificationCount();
-    setInterval(updateNotificationCount, 30000);
+    // Fallback heartbeat every 90s (real-time updates handled instantly by FCM push)
+    setInterval(updateNotificationCount, 90000);
 }
 
 const DEFAULT_STORE_AVATAR = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 24 24" fill="%23004D40"><path d="M19 6h-2c0-2.76-2.24-5-5-5S7 3.24 7 6H5c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-7-3c1.66 0 3 1.34 3 3H9c0-1.66 1.34-3 3-3zm7 17H5V8h14v12z"/></svg>`;
@@ -787,15 +789,15 @@ export async function initMarket() {
     checkBuzzerAlarm();
     renderActiveTab();
 
-    // Poll orders every 10s — only re-render if on orders tab
+    // Fallback heartbeat every 60s (real-time updates handled instantly by FCM push)
     setInterval(async () => {
         try {
             await refreshOrders();
             updateBadges();
             checkBuzzerAlarm();
             if (activeTab === 'orders') renderActiveTab();
-        } catch (e) { console.error('Error polling orders:', e); }
-    }, 10000);
+        } catch (e) { console.error('Error in fallback order sync:', e); }
+    }, 60000);
 }
 
 // Check if there are new pending orders for this store to sound alarm
@@ -943,6 +945,12 @@ function renderActiveTab() {
             }
         } else if (activeTab === 'chats') {
             renderChatsTab(container);
+        } else if (activeTab === 'overview') {
+            renderMerchantOverview(container, apiClient);
+        } else if (activeTab === 'settlements') {
+            renderMerchantSettlements(container, apiClient);
+        } else if (activeTab === 'wallet') {
+            renderMerchantWallet(container, apiClient);
         } else if (activeTab === 'schedule') {
             renderScheduleTab(container);
         } else if (activeTab === 'settings') {
