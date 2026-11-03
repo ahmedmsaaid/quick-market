@@ -5,12 +5,12 @@
  * Type = 1 (Supermarket)
  */
 
-import * as ui from './ui-utils.js?v=35.0';
-import { t, getLanguage, setLanguage, initTranslations, subscribeLangChange } from './translations.js?v=35.0';
-import { ApiClient, ImageService, Logger } from './core.js?v=35.0';
-import { initFCMNotificationService } from './fcm-helper.js?v=35.0';
-import { initSignalRNotificationService, stopSignalRConnection } from './signalr-helper.js?v=35.0';
-import { renderMerchantOverview, renderMerchantSettlements, renderMerchantWallet } from './modules/merchant-financial.js?v=35.0';
+import * as ui from './ui-utils.js?v=43.0';
+import { t, getLanguage, setLanguage, initTranslations, subscribeLangChange } from './translations.js?v=42.0';
+import { ApiClient, ImageService, Logger } from './core.js?v=42.0';
+import { initFCMNotificationService } from './fcm-helper.js?v=42.0';
+import { initSignalRNotificationService, stopSignalRConnection } from './signalr-helper.js?v=42.0';
+import { renderMerchantOverview, renderMerchantSettlements, renderMerchantWallet } from './modules/merchant-financial.js?v=42.0';
 console.log('🛒 market.js module loaded');
 
 function clearInvalid(inputEl) {
@@ -321,7 +321,11 @@ async function refreshOrders() {
             console.log("DEBUG - myProductIds Set:", Array.from(myProductIds));
             const fetchedOrders = data.result.filter(ord => {
                 // Must match this market's userId or products
-                if (ord.userId && parseInt(ord.userId) === parseInt(myMarketId)) return true;
+                const ordVendorId = ord.userId || (ord.user && ord.user.id) || (ord.userLocation && ord.userLocation.creatorId);
+                if (ordVendorId && parseInt(ordVendorId) === parseInt(myMarketId)) return true;
+                if (ord.offerId && (offers || []).some(of => parseInt(of.id) === parseInt(ord.offerId))) return true;
+                const checkProds = ord.products || ord.orderProducts || ord.OrderProducts || [];
+                if (checkProds.length > 0 && checkProds.some(p => myProductIds.has(parseInt(p.productId || (p.product && p.product.id) || (p.Product && p.Product.id))))) return true;
                 if (ord.products && ord.products.length > 0) {
                     return ord.products.some(p => myProductIds.has(p.productId));
                 }
@@ -350,19 +354,24 @@ async function refreshOrders() {
                     items,
                     totalPrice: ord.totalPrice - (ord.deliveryFee || 0) - (ord.orderFee || 0),
                     deliveryFee: ord.deliveryFee || 0,
+                    orderFee: parseFloat(ord.orderFee || (ord.rawOrder && ord.rawOrder.orderFee) || 0),
+                    commission: parseFloat(ord.commission || (ord.rawOrder && ord.rawOrder.commission) || ord.orderFee || (ord.rawOrder && ord.rawOrder.orderFee) || 0),
+                    netEarnings: parseFloat(ord.netEarnings || (ord.rawOrder && ord.rawOrder.netEarnings) || 0),
+                    type: 1,
                     finalTotal: ord.totalPrice,
                     paymentMethod: ord.paymentMethod || (ord.rawOrder && ord.rawOrder.paymentMethod) || 0,
                     notes: ord.note || ord.notes || '',
                     customerName: ord.creator ? ord.creator.name : (ord.user && ord.user.role === 2 ? ord.user.name : (getLanguage() === 'ar' ? 'عميل' : 'Customer')),
                     customerPhone: ord.creator ? ord.creator.phone : (ord.user && ord.user.role === 2 ? ord.user.phone : ''),
-                    createdAt: ord.createdAt,
+                    createdAt: ord.createdAt || ord.createdOn,
                     rawOrder: ord
                 };
             });
 
             // Detect new incoming pending orders for notifications
             if (knownOrderIds !== null) {
-                const newIncoming = fetchedOrders.filter(o => !knownOrderIds.has(o.id) && (o.status === 'new' || o.status === 'pending_payment' || o.status === 'pending'));
+                const prevConfirmedIds = new Set(orders.filter(o => o.status === 'confirmed').map(o => o.id));
+                const newIncoming = fetchedOrders.filter(o => (o.status === 'confirmed' && !prevConfirmedIds.has(o.id)) || (!knownOrderIds.has(o.id) && o.status === 'waiting_for_driver'));
                 if (newIncoming.length > 0) {
                     console.log('🛒 New incoming supermarket orders detected:', newIncoming);
                     ui.showFullScreenOrderAlert(newIncoming[0].id, () => {
@@ -372,11 +381,11 @@ async function refreshOrders() {
                     
                     newIncoming.forEach(ord => {
                         const title = getLanguage() === 'ar' 
-                            ? `🛒 طلب سوبر ماركت جديد! (#${ord.id})` 
-                            : `🛒 New Supermarket Order! (#${ord.id})`;
+                            ? (ord.status === 'confirmed' ? `✅ الطيار قَبِل الطلب (#${ord.id}) - ابدأ التجهيز!` : `⏳ طلب جديد بانتظار طيار (#${ord.id})`) 
+                            : (ord.status === 'confirmed' ? `✅ Captain Accepted Order (#${ord.id}) - Start Prep!` : `⏳ New Order Awaiting Captain (#${ord.id})`);
                         const body = getLanguage() === 'ar'
-                            ? `طلب جديد من ${ord.customerName} - الإجمالي: ${ord.totalPrice} د.ع`
-                            : `New supermarket order from ${ord.customerName} - Total: ${ord.totalPrice} IQD`;
+                            ? `طلب جديد من ${ord.customerName} - الإجمالي: ${ord.finalTotal || ord.totalPrice} ج.م`
+                            : `New supermarket order from ${ord.customerName} - Total: ${ord.finalTotal || ord.totalPrice} EGP`;
                         
                         ui.sendDesktopNotification(title, body, { tag: 'order-' + ord.id });
                         ui.showToast(getLanguage() === 'ar' ? `وصل طلب جديد! #${ord.id}` : `New order received! #${ord.id}`, 'info');
@@ -384,8 +393,12 @@ async function refreshOrders() {
                 }
             }
 
+            const prevSig = orders.map(o => `${o.id}:${o.status}`).join('|');
+            const nextSig = fetchedOrders.map(o => `${o.id}:${o.status}`).join('|');
+            const hasChanges = prevSig !== nextSig;
             knownOrderIds = new Set(fetchedOrders.map(o => o.id));
             orders = fetchedOrders;
+            return hasChanges;
         }
     } catch (e) { console.error('Failed to load orders:', e); }
 }
@@ -514,6 +527,7 @@ async function updateStatus(orderId, localStatus) {
         });
         await refreshOrders();
         updateBadges();
+        checkBuzzerAlarm();
         renderActiveTab();
     } catch (e) {
         console.error('Failed to update order status:', e);
@@ -540,7 +554,7 @@ async function updateNotificationCount() {
         if (res && res.success) {
             serverCount = parseInt(res.result || 0);
         }
-        const pendingCount = orders.filter(o => o.status === 'new' || o.status === 'pending_payment' || o.status === 'pending').length;
+        const pendingCount = orders.filter(o => o.status === 'confirmed' || o.status === 'waiting_for_driver').length;
         const totalCount = Math.max(serverCount, pendingCount);
         if (totalCount > 0) {
             badge.textContent = totalCount;
@@ -550,7 +564,7 @@ async function updateNotificationCount() {
         }
     } catch (e) {
         console.error('Failed to fetch notification count:', e);
-        const pendingCount = orders.filter(o => o.status === 'new' || o.status === 'pending_payment' || o.status === 'pending').length;
+        const pendingCount = orders.filter(o => o.status === 'confirmed' || o.status === 'waiting_for_driver').length;
         if (pendingCount > 0) {
             badge.textContent = pendingCount;
             badge.style.display = 'flex';
@@ -666,7 +680,7 @@ async function initNotificationsSystem() {
 
     await updateNotificationCount();
     // Fallback heartbeat every 90s (real-time updates handled instantly by FCM push)
-    setInterval(updateNotificationCount, 90000);
+    setInterval(updateNotificationCount, 15000);
 }
 
 const DEFAULT_STORE_AVATAR = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 24 24" fill="%23004D40"><path d="M19 6h-2c0-2.76-2.24-5-5-5S7 3.24 7 6H5c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-7-3c1.66 0 3 1.34 3 3H9c0-1.66 1.34-3 3-3zm7 17H5V8h14v12z"/></svg>`;
@@ -792,17 +806,17 @@ export async function initMarket() {
     // Fallback heartbeat every 60s (real-time updates handled instantly by FCM push)
     setInterval(async () => {
         try {
-            await refreshOrders();
+            const hasOrderChanges = await refreshOrders();
             updateBadges();
             checkBuzzerAlarm();
-            if (activeTab === 'orders') renderActiveTab();
+            if (hasOrderChanges && (activeTab === 'orders' || activeTab === 'overview')) renderActiveTab();
         } catch (e) { console.error('Error in fallback order sync:', e); }
-    }, 60000);
+    }, 5000);
 }
 
 // Check if there are new pending orders for this store to sound alarm
 function checkBuzzerAlarm() {
-    const hasIncoming = orders.some(o => o.status === 'new' || o.status === 'pending_payment' || o.status === 'pending');
+    const hasIncoming = orders.some(o => o.status === 'confirmed');
     if (hasIncoming) {
         ui.startAlarmSound();
     } else {
@@ -813,7 +827,7 @@ function checkBuzzerAlarm() {
 // ─── Navigation ───────────────────────────────────────────────────────────────
 function updateBadges() {
     const badge = document.getElementById('mkt-badge-orders');
-    const pendingCount = orders.filter(o => o.status === 'new' || o.status === 'pending_payment' || o.status === 'pending').length;
+    const pendingCount = orders.filter(o => o.status === 'confirmed' || o.status === 'waiting_for_driver').length;
     if (badge) {
         badge.textContent = pendingCount;
         badge.style.display = pendingCount > 0 ? 'inline-block' : 'none';
@@ -1613,9 +1627,9 @@ function showEditProductModal(item) {
    ========================================================================== */
 function renderOrdersTab(parent) {
     // New orders needing accept/decline
-    const newOrders = orders.filter(o => o.status === 'new' || o.status === 'pending_payment');
+    const newOrders = [];
     // Accepted, waiting for captain to confirm
-    const waitingOrders = orders.filter(o => o.status === 'waiting_for_driver');
+    const waitingOrders = orders.filter(o => o.status === 'waiting_for_driver' || o.status === 'new' || o.status === 'pending_payment');
     // Captain confirmed, market can prepare
     const confirmedOrders = orders.filter(o => o.status === 'confirmed' || o.status === 'preparing');
     const completedOrders = orders.filter(o => o.status === 'completed' || o.status === 'ready_for_pickup' || o.status === 'on_the_way');
@@ -1664,11 +1678,11 @@ function renderOrdersTab(parent) {
 function buildOrderCard(container, ord, readonly = false) {
     const isAr = getLanguage() === 'ar';
     let onAccept = null;
-    let acceptText = '✔ تأكيد القبول';
+    let acceptText = isAr ? '✔ تأكيد القبول' : '✔ Accept Order';
 
     if (!readonly) {
         if (ord.status === 'new' || ord.status === 'pending_payment') {
-            acceptText = '✔ تأكيد القبول';
+            acceptText = isAr ? '✔ تأكيد القبول' : '✔ Accept Order';
             onAccept = () => {
                 const paymentMethod = ord.rawOrder ? ord.rawOrder.paymentMethod : 0;
                 const acceptStatus = paymentMethod === 1 ? 'pending_payment' : 'waiting_for_driver';

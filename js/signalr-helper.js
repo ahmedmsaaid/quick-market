@@ -4,7 +4,7 @@
  * authenticated via JWT Bearer token, and handles live incoming events.
  */
 
-import * as ui from './ui-utils.js';
+import * as ui from './ui-utils.js?v=42.0';
 import { getLanguage, t } from './translations.js';
 
 let hubConnection = null;
@@ -121,7 +121,7 @@ function handleIncomingSignalRNotification(notification, onNotificationCallback)
 
     if (notification.recipientMessage) {
         message = isAr ? (notification.recipientMessage.ar || notification.recipientMessage.en)
-                       : (notification.recipientMessage.en || notification.recipientMessage.ar);
+            : (notification.recipientMessage.en || notification.recipientMessage.ar);
     }
 
     if (!message && notification.content) {
