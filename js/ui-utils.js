@@ -3,7 +3,7 @@
  * Follows strict secure coding rules to avoid innerHTML assignments and PII exposure.
  */
 
-import { t, getLanguage } from './translations.js';
+import { t, getLanguage } from './translations.js?v=46.0';
 
 // Global state for Audio Synthesizer Alert
 let audioCtx = null;
@@ -1751,7 +1751,8 @@ export function renderOrderView(order, options = {}) {
     // 5. Card 4: Customer Notes
     const card4 = createElement('div', ['qs-order-card']);
     card4.appendChild(createElementWithText('div', isAr ? 'ملاحظات العميل' : 'Customer Notes', ['qs-order-section-title', 'qs-order-card-label']));
-    const notesText = order.notes && order.notes.trim() ? order.notes.trim() : (isAr ? 'لا توجد ملاحظات' : 'No notes');
+    const rawOrderNotes = (order.notes || order.note || order.Notes || order.Note || (order.rawOrder && (order.rawOrder.notes || order.rawOrder.note || order.rawOrder.Notes || order.rawOrder.Note)) || '').toString().trim();
+    const notesText = rawOrderNotes ? rawOrderNotes : (isAr ? 'لا توجد ملاحظات' : 'No notes');
     card4.appendChild(createElementWithText('div', notesText, ['qs-order-notes-content']));
     container.appendChild(card4);
 
@@ -1852,6 +1853,12 @@ export function renderDashboardOrderCard(order, options = {}) {
     const itemsSummary = items.map(it => `${it.qty || 1}x ${it.name}`).join('، ') || (isAr ? 'لا توجد أصناف' : 'No items');
     const itemsRow = createElement('div', ['qs-dash-order-items-compact']);
     itemsRow.appendChild(createElementWithText('span', `📦 ${items.length} ${isAr ? 'أصناف' : 'items'}: ${itemsSummary}`));
+    const cardNotes = (order.notes || order.note || order.Notes || order.Note || (order.rawOrder && (order.rawOrder.notes || order.rawOrder.note || order.rawOrder.Notes || order.rawOrder.Note)) || '').toString().trim();
+    if (cardNotes) {
+        const notesRow = createElement('div', ['qs-dash-order-notes-compact'], { style: 'font-size: 0.78rem; color: #f59e0b; background: rgba(245, 158, 11, 0.1); border: 1px dashed rgba(245, 158, 11, 0.35); border-radius: 6px; padding: 4px 8px; margin-top: 4px;' });
+        notesRow.appendChild(createElementWithText('span', `📝 ${isAr ? 'ملاحظات:' : 'Notes:'} ${cardNotes}`));
+        itemsRow.appendChild(notesRow);
+    }
     body.appendChild(itemsRow);
 
     // Financial Breakdown & Store Net Payout
@@ -1946,6 +1953,16 @@ export function renderDashboardOrderCard(order, options = {}) {
 /**
  * Shows the order details in an overlay modal matching the mobile reference
  */
+export function createEmptyState(message, icon = '📭') {
+    const isAr = (typeof getLanguage === 'function' ? getLanguage() : (localStorage.getItem('portal_lang') || 'ar')) === 'ar';
+    const wrapper = createElement('div', ['empty-state-box'], {
+        style: 'display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2.5rem 1rem; text-align: center; color: var(--text-muted, #94a3b8); gap: 0.5rem;'
+    });
+    wrapper.appendChild(createElementWithText('div', icon, [], { style: 'font-size: 2.2rem; line-height: 1; margin-bottom: 0.25rem; opacity: 0.85;' }));
+    wrapper.appendChild(createElementWithText('p', message || (isAr ? 'لا توجد بيانات متاحة حالياً' : 'No data available'), [], { style: 'margin: 0; font-size: 0.95rem; font-weight: 600; color: var(--text-secondary, #cbd5e1);' }));
+    return wrapper;
+}
+
 export function showOrderDetailsModal(order, onAcceptCallback = null, customAcceptText = null) {
     let overlay = document.getElementById('modal-overlay');
     let modalContainer = document.getElementById('modal-container');

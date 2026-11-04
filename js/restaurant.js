@@ -539,7 +539,7 @@ async function refreshOrders() {
                     type: 0,
                     finalTotal: ord.totalPrice,
                     paymentMethod: ord.paymentMethod || (ord.rawOrder && ord.rawOrder.paymentMethod) || 0,
-                    notes: ord.note || ord.notes || '',
+                    notes: ord.notes || ord.note || ord.Notes || ord.Note || ord.description || ord.customerNotes || '',
                     customerName: ord.creator ? ord.creator.name : (ord.user && ord.user.role === 2 ? ord.user.name : (getLanguage() === 'ar' ? 'عميل' : 'Customer')),
                     customerPhone: ord.creator ? ord.creator.phone : (ord.user && ord.user.role === 2 ? ord.user.phone : ''),
                     createdAt: ord.createdAt || ord.createdOn,
@@ -588,11 +588,24 @@ async function refreshOrders() {
 
 // Status Updates
 async function updateStatus(orderId, localStatus, extra = {}) {
+    const shouldAutoPrint = (localStatus === 'preparing' || localStatus === 'waiting_for_driver' || localStatus === 'pending_payment');
+    let currentOrder = null;
+    let statusUpdatedOk = false;
     try {
         let backendStatus = mapLocalStatusToBackend(localStatus);
         const order = orders.find(o => o.id === orderId.toString());
 
         const rowVersion = order && order.rawOrder ? order.rawOrder.rowVersion : null;
+        currentOrder = order;
+        statusUpdatedOk = true;
+        Promise.resolve().then(() => {
+            setTimeout(() => {
+                if (statusUpdatedOk && shouldAutoPrint && typeof ui.printOrderReceipt === 'function') {
+                    const targetOrd = orders.find(o => o.id === orderId.toString()) || currentOrder;
+                    if (targetOrd) ui.printOrderReceipt(targetOrd);
+                }
+            }, 450);
+        });
 
         await apiFetch('/api/v1/orders/status', {
             method: 'PUT',
@@ -608,6 +621,7 @@ async function updateStatus(orderId, localStatus, extra = {}) {
         checkBuzzerAlarm();
         renderActiveTab();
     } catch (e) {
+        statusUpdatedOk = false;
         console.error('Failed to update order status:', e);
         ui.showToast(t('error_generic') + ': ' + e.message, 'error');
     }
@@ -1215,7 +1229,7 @@ function renderQueueTab(parent) {
             const paymentMethod = ord.rawOrder ? ord.rawOrder.paymentMethod : 0;
             const acceptStatus = paymentMethod === 1 ? 'pending_payment' : 'waiting_for_driver';
 
-            await updateStatus(ord.id, 'preparing', { prepTime });
+            await updateStatus(ord.id, (ord.status === 'new' || ord.status === 'pending_payment') ? acceptStatus : 'preparing', { prepTime });
             ui.showToast(getLanguage() === 'ar' ? 'تم بدء تحضير الطلب بنجاح!' : 'Order preparation started!', 'success');
 
             const targetTabBtn = document.getElementById('rest-menu-kanban') || document.getElementById('rest-menu-queue');
@@ -1223,7 +1237,7 @@ function renderQueueTab(parent) {
         };
 
         const cardView = ui.renderDashboardOrderCard(ord, {
-            readonly: ord.status !== 'confirmed',
+            readonly: (ord.status !== 'confirmed' && ord.status !== 'new' && ord.status !== 'pending_payment'),
             acceptText: getLanguage() === 'ar' ? '🍳 بدء التحضير' : '🍳 Start Preparing',
             onAccept
         });

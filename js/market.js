@@ -5,12 +5,12 @@
  * Type = 1 (Supermarket)
  */
 
-import * as ui from './ui-utils.js?v=43.0';
-import { t, getLanguage, setLanguage, initTranslations, subscribeLangChange } from './translations.js?v=42.0';
+import * as ui from './ui-utils.js?v=46.0';
+import { t, getLanguage, setLanguage, initTranslations, subscribeLangChange } from './translations.js?v=46.0';
 import { ApiClient, ImageService, Logger } from './core.js?v=42.0';
 import { initFCMNotificationService } from './fcm-helper.js?v=42.0';
 import { initSignalRNotificationService, stopSignalRConnection } from './signalr-helper.js?v=42.0';
-import { renderMerchantOverview, renderMerchantSettlements, renderMerchantWallet } from './modules/merchant-financial.js?v=42.0';
+import { renderMerchantOverview, renderMerchantSettlements, renderMerchantWallet } from './modules/merchant-financial.js?v=46.0';
 console.log('🛒 market.js module loaded');
 
 function clearInvalid(inputEl) {
@@ -360,7 +360,7 @@ async function refreshOrders() {
                     type: 1,
                     finalTotal: ord.totalPrice,
                     paymentMethod: ord.paymentMethod || (ord.rawOrder && ord.rawOrder.paymentMethod) || 0,
-                    notes: ord.note || ord.notes || '',
+                    notes: ord.notes || ord.note || ord.Notes || ord.Note || ord.description || ord.customerNotes || '',
                     customerName: ord.creator ? ord.creator.name : (ord.user && ord.user.role === 2 ? ord.user.name : (getLanguage() === 'ar' ? 'عميل' : 'Customer')),
                     customerPhone: ord.creator ? ord.creator.phone : (ord.user && ord.user.role === 2 ? ord.user.phone : ''),
                     createdAt: ord.createdAt || ord.createdOn,
@@ -519,6 +519,7 @@ async function updateStatus(orderId, localStatus) {
     try {
         let backendStatus = mapLocalStatusToBackend(localStatus);
         const order = orders.find(o => o.id === orderId.toString());
+        const shouldAutoPrint = (localStatus === 'preparing' || localStatus === 'waiting_for_driver' || localStatus === 'pending_payment');
         
         const rowVersion = order && order.rawOrder ? order.rawOrder.rowVersion : null;
         await apiFetch('/api/v1/orders/status', {
@@ -529,6 +530,13 @@ async function updateStatus(orderId, localStatus) {
         updateBadges();
         checkBuzzerAlarm();
         renderActiveTab();
+
+        if (shouldAutoPrint) {
+            const updatedOrder = orders.find(o => o.id === orderId.toString()) || order;
+            if (updatedOrder && typeof ui.printOrderReceipt === 'function') {
+                setTimeout(() => ui.printOrderReceipt(updatedOrder), 150);
+            }
+        }
     } catch (e) {
         console.error('Failed to update order status:', e);
         ui.showToast(t('error_generic') + ': ' + e.message, 'error');
@@ -1627,9 +1635,9 @@ function showEditProductModal(item) {
    ========================================================================== */
 function renderOrdersTab(parent) {
     // New orders needing accept/decline
-    const newOrders = [];
+    const newOrders = orders.filter(o => o.status === 'new' || o.status === 'pending_payment');
     // Accepted, waiting for captain to confirm
-    const waitingOrders = orders.filter(o => o.status === 'waiting_for_driver' || o.status === 'new' || o.status === 'pending_payment');
+    const waitingOrders = orders.filter(o => o.status === 'waiting_for_driver');
     // Captain confirmed, market can prepare
     const confirmedOrders = orders.filter(o => o.status === 'confirmed' || o.status === 'preparing');
     const completedOrders = orders.filter(o => o.status === 'completed' || o.status === 'ready_for_pickup' || o.status === 'on_the_way');
