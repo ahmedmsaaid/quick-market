@@ -2050,7 +2050,7 @@ function renderDiscountsTab(parent) {
     const wrapper = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 1rem; width: 100%;' });
     const topBar = ui.createElement('div', [], { style: 'display: flex; justify-content: flex-end;' });
     const addDiscountBtn = ui.createElementWithText('button', t('rest_discount_add_btn'), ['btn', 'btn-primary']);
-    addDiscountBtn.addEventListener('click', showAddDiscountModal);
+    addDiscountBtn.addEventListener('click', () => showAddDiscountModal(null));
     topBar.appendChild(addDiscountBtn);
     wrapper.appendChild(topBar);
 
@@ -2066,11 +2066,26 @@ function renderDiscountsTab(parent) {
             const card = ui.createElement('div', ['summary-card'], { style: 'display: flex; flex-direction: column; justify-content: space-between; min-height: 220px; position: relative;' });
 
             const header = ui.createElement('div', [], { style: 'display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem; width: 100%;' });
-            const name = ui.createElementWithText('strong', disc.name || '-', [], { style: 'font-size: 1.1rem; font-weight: 700; color: var(--text-primary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;' });
+            const nameBadge = ui.createElement('div', [], {
+                style: 'display: inline-flex; align-items: center; gap: 0.35rem; font-size: 1.05rem; font-weight: 800; color: var(--mkt-color, #2ed573); background: rgba(46, 213, 115, 0.1); border: 1px dashed rgba(46, 213, 115, 0.45); padding: 0.25rem 0.65rem; border-radius: 8px; cursor: pointer; max-width: 70%; overflow: hidden;',
+                title: getLanguage() === 'ar' ? 'اضغط لنسخ الكود' : 'Click to copy code'
+            });
+            nameBadge.innerHTML = `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">🎟️ ${disc.name || '-'}</span> <span style="font-size:0.75rem;">📋</span>`;
+            nameBadge.addEventListener('click', () => {
+                navigator.clipboard.writeText(disc.name || '');
+                ui.showToast(getLanguage() === 'ar' ? `تم نسخ الكود: ${disc.name}` : `Copied code: ${disc.name}`, 'success');
+            });
+
+            const btnGroup = ui.createElement('div', [], { style: 'display: flex; gap: 0.35rem; flex-shrink: 0;' });
+            const editBtn = ui.createElementWithText('button', '✏️', ['btn', 'btn-secondary', 'btn-sm'], { style: 'padding: 0.25rem 0.5rem; font-size: 0.85rem; border-radius: 4px;' });
+            editBtn.addEventListener('click', () => showAddDiscountModal(disc));
             const deleteBtn = ui.createElementWithText('button', '🗑️', ['btn', 'btn-danger', 'btn-sm'], { style: 'padding: 0.25rem 0.5rem; font-size: 0.85rem; border-radius: 4px;' });
             deleteBtn.addEventListener('click', () => handleDeleteDiscount(disc));
-            header.appendChild(name);
-            header.appendChild(deleteBtn);
+            btnGroup.appendChild(editBtn);
+            btnGroup.appendChild(deleteBtn);
+
+            header.appendChild(nameBadge);
+            header.appendChild(btnGroup);
             card.appendChild(header);
 
             card.appendChild(ui.createElementWithText('p', disc.description || '-', ['text-secondary'], { style: 'font-size: 0.8rem; margin: 0.5rem 0; flex-grow: 1; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;' }));
@@ -2096,27 +2111,38 @@ function renderDiscountsTab(parent) {
     parent.appendChild(wrapper);
 }
 
-function showAddDiscountModal() {
+function showAddDiscountModal(existingDisc = null) {
+    const isEdit = !!existingDisc;
+    const toLocalInput = (iso) => {
+        if (!iso) return '';
+        try {
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return '';
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        } catch (_) { return ''; }
+    };
+
     const form = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 1rem; min-width: 320px;' });
 
     const fields = [
-        { label: t('rest_discount_modal_name'), type: 'text', placeholder: getLanguage() === 'ar' ? 'مثال: خصم الصيف' : 'e.g. Summer Discount' },
-        { label: t('rest_discount_modal_desc'), type: 'text', placeholder: getLanguage() === 'ar' ? 'وصف...' : 'Description...' },
-        { label: t('rest_discount_modal_percentage'), type: 'number', placeholder: '15', min: '1', max: '100' },
-        { label: t('rest_discount_modal_start'), type: 'datetime-local' },
-        { label: t('rest_discount_modal_end'), type: 'datetime-local' }
+        { label: t('rest_discount_modal_name'), type: 'text', value: existingDisc?.name || '', placeholder: getLanguage() === 'ar' ? 'مثال: خصم الصيف / SUMMER15' : 'e.g. Summer Discount / SUMMER15' },
+        { label: t('rest_discount_modal_desc'), type: 'text', value: existingDisc?.description || '', placeholder: getLanguage() === 'ar' ? 'وصف...' : 'Description...' },
+        { label: t('rest_discount_modal_percentage'), type: 'number', value: existingDisc?.percentage ?? '', placeholder: '15', min: '1', max: '100' },
+        { label: t('rest_discount_modal_start'), type: 'datetime-local', value: toLocalInput(existingDisc?.startDate) },
+        { label: t('rest_discount_modal_end'), type: 'datetime-local', value: toLocalInput(existingDisc?.endDate) }
     ];
     const inputs = fields.map(f => {
         const wrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
         wrap.appendChild(ui.createElementWithText('label', f.label, [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
-        const inp = ui.createElement('input', ['search-input'], { type: f.type, ...(f.placeholder ? { placeholder: f.placeholder } : {}), ...(f.min ? { min: f.min } : {}), ...(f.max ? { max: f.max } : {}) });
+        const inp = ui.createElement('input', ['search-input'], { type: f.type, value: f.value !== undefined ? String(f.value) : '', ...(f.placeholder ? { placeholder: f.placeholder } : {}), ...(f.min ? { min: f.min } : {}), ...(f.max ? { max: f.max } : {}) });
         wrap.appendChild(inp);
         form.appendChild(wrap);
         return inp;
     });
     const [nameIn, descIn, pctIn, startIn, endIn] = inputs;
 
-    ui.showModal(t('rest_discount_modal_add_title'), form, [
+    ui.showModal(isEdit ? (getLanguage() === 'ar' ? '✏️ تعديل الخصم / الكود' : '✏️ Edit Discount') : t('rest_discount_modal_add_title'), form, [
         {
             text: t('rest_discount_modal_save'),
             type: 'success',
@@ -2124,7 +2150,7 @@ function showAddDiscountModal() {
             onClick: async () => {
                 const name = nameIn.value.trim();
                 const pctVal = pctIn.value.trim();
-                const description = descIn.value.trim();
+                const description = descIn.value.trim() || name;
                 const startDateVal = startIn.value;
                 const endDateVal = endIn.value;
 
@@ -2145,8 +2171,24 @@ function showAddDiscountModal() {
 
                 if (!isValid) return;
 
-                const startDate = startDateVal ? new Date(startDateVal).toISOString() : null;
-                const endDate = endDateVal ? new Date(endDateVal).toISOString() : null;
+                const startDate = startDateVal ? new Date(startDateVal).toISOString() : new Date().toISOString();
+                const endDate = endDateVal ? new Date(endDateVal).toISOString() : new Date(Date.now() + 7 * 86400000).toISOString();
+
+                if (isEdit) {
+                    ui.closeModal();
+                    try {
+                        await apiFetch('/api/v1/discounts', {
+                            method: 'PUT',
+                            body: JSON.stringify({ id: existingDisc.id, name, description, percentage, type: 1, startDate, endDate })
+                        });
+                        ui.showToast(getLanguage() === 'ar' ? 'تم تعديل الخصم بنجاح' : 'Discount updated successfully', 'success');
+                        await refreshDiscounts();
+                        if (activeTab === 'discounts') renderActiveTab();
+                    } catch (err) {
+                        ui.showToast((getLanguage() === 'ar' ? 'فشل تعديل الخصم: ' : 'Failed to update discount: ') + err.message, 'error');
+                    }
+                    return;
+                }
                 const tempId = 'temp-' + Date.now();
                 discounts.push({ id: tempId, name, description, percentage, type: 1, startDate, endDate, isActive: true });
                 ui.closeModal();
