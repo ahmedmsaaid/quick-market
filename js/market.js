@@ -2125,12 +2125,15 @@ function showAddDiscountModal(existingDisc = null) {
 
     const form = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 1rem; min-width: 320px;' });
 
+    const defaultStartIso = existingDisc?.startDate || new Date().toISOString();
+    const defaultEndIso = existingDisc?.endDate || new Date(Date.now() + 7 * 86400000).toISOString();
+
     const fields = [
         { label: t('rest_discount_modal_name'), type: 'text', value: existingDisc?.name || '', placeholder: getLanguage() === 'ar' ? 'مثال: خصم الصيف / SUMMER15' : 'e.g. Summer Discount / SUMMER15' },
         { label: t('rest_discount_modal_desc'), type: 'text', value: existingDisc?.description || '', placeholder: getLanguage() === 'ar' ? 'وصف...' : 'Description...' },
         { label: t('rest_discount_modal_percentage'), type: 'number', value: existingDisc?.percentage ?? '', placeholder: '15', min: '1', max: '100' },
-        { label: t('rest_discount_modal_start'), type: 'datetime-local', value: toLocalInput(existingDisc?.startDate) },
-        { label: t('rest_discount_modal_end'), type: 'datetime-local', value: toLocalInput(existingDisc?.endDate) }
+        { label: t('rest_discount_modal_start'), type: 'datetime-local', value: toLocalInput(defaultStartIso) },
+        { label: t('rest_discount_modal_end'), type: 'datetime-local', value: toLocalInput(defaultEndIso) }
     ];
     const inputs = fields.map(f => {
         const wrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
