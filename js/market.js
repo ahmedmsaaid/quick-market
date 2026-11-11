@@ -2091,8 +2091,13 @@ function renderDiscountsTab(parent) {
             card.appendChild(ui.createElementWithText('p', disc.description || '-', ['text-secondary'], { style: 'font-size: 0.8rem; margin: 0.5rem 0; flex-grow: 1; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;' }));
 
             const percentContainer = ui.createElement('div', [], { style: 'display: flex; align-items: baseline; gap: 0.35rem; margin: 0.75rem 0;' });
-            percentContainer.appendChild(ui.createElementWithText('span', `${disc.percentage}%`, [], { style: 'font-size: 2.25rem; font-weight: 800; color: var(--mkt-color, #2ed573); font-family: "Outfit", sans-serif;' }));
-            percentContainer.appendChild(ui.createElementWithText('span', getLanguage() === 'ar' ? 'خصم' : 'OFF', [], { style: 'font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase;' }));
+            if (disc.type === 1) {
+                const freeVal = ui.createElementWithText('span', getLanguage() === 'ar' ? '🛵 توصيل مجاني' : '🛵 Free Delivery', [], { style: 'font-size: 1.4rem; font-weight: 800; color: #10b981;' });
+                percentContainer.appendChild(freeVal);
+            } else {
+                percentContainer.appendChild(ui.createElementWithText('span', `${disc.percentage}%`, [], { style: 'font-size: 2.25rem; font-weight: 800; color: var(--mkt-color, #2ed573); font-family: "Outfit", sans-serif;' }));
+                percentContainer.appendChild(ui.createElementWithText('span', getLanguage() === 'ar' ? 'خصم' : 'OFF', [], { style: 'font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase;' }));
+            }
             card.appendChild(percentContainer);
 
             const cardFooter = ui.createElement('div', [], { style: 'border-top: 1px solid var(--border-color); padding-top: 0.75rem; display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.75rem; color: var(--text-muted);' });
@@ -2124,51 +2129,84 @@ function showAddDiscountModal(existingDisc = null) {
     };
 
     const form = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 1rem; min-width: 320px;' });
+    const isAr = getLanguage() === 'ar';
 
     const defaultStartIso = existingDisc?.startDate || new Date().toISOString();
     const defaultEndIso = existingDisc?.endDate || new Date(Date.now() + 7 * 86400000).toISOString();
 
-    const fields = [
-        { label: t('rest_discount_modal_name'), type: 'text', value: existingDisc?.name || '', placeholder: getLanguage() === 'ar' ? 'مثال: خصم الصيف / SUMMER15' : 'e.g. Summer Discount / SUMMER15' },
-        { label: t('rest_discount_modal_desc'), type: 'text', value: existingDisc?.description || '', placeholder: getLanguage() === 'ar' ? 'وصف...' : 'Description...' },
-        { label: t('rest_discount_modal_percentage'), type: 'number', value: existingDisc?.percentage ?? '', placeholder: '15', min: '1', max: '100' },
-        { label: t('rest_discount_modal_start'), type: 'datetime-local', value: toLocalInput(defaultStartIso) },
-        { label: t('rest_discount_modal_end'), type: 'datetime-local', value: toLocalInput(defaultEndIso) }
-    ];
-    const inputs = fields.map(f => {
-        const wrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
-        wrap.appendChild(ui.createElementWithText('label', f.label, [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
-        const inp = ui.createElement('input', ['search-input'], { type: f.type, value: f.value !== undefined ? String(f.value) : '', ...(f.placeholder ? { placeholder: f.placeholder } : {}), ...(f.min ? { min: f.min } : {}), ...(f.max ? { max: f.max } : {}) });
-        wrap.appendChild(inp);
-        form.appendChild(wrap);
-        return inp;
-    });
-    const [nameIn, descIn, pctIn, startIn, endIn] = inputs;
+    const nameWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
+    nameWrap.appendChild(ui.createElementWithText('label', t('rest_discount_modal_name'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+    const nameIn = ui.createElement('input', ['search-input'], { type: 'text', value: existingDisc?.name || '', placeholder: isAr ? 'مثال: خصم الصيف / SUMMER15' : 'e.g. Summer Discount / SUMMER15' });
+    nameWrap.appendChild(nameIn);
 
-    ui.showModal(isEdit ? (getLanguage() === 'ar' ? '✏️ تعديل الخصم / الكود' : '✏️ Edit Discount') : t('rest_discount_modal_add_title'), form, [
+    const typeWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
+    typeWrap.appendChild(ui.createElementWithText('label', isAr ? 'نوع البرومو كود *' : 'Promo Code Type *', [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+    const typeSel = ui.createElement('select', ['select-input']);
+    typeSel.appendChild(ui.createElementWithText('option', isAr ? '🏷️ خصم بنسبة مئوية (Discount %)' : '🏷️ Percentage Discount (%)', [], { value: '0' }));
+    typeSel.appendChild(ui.createElementWithText('option', isAr ? '🛵 توصيل مجاني (Free Delivery)' : '🛵 Free Delivery', [], { value: '1' }));
+    typeSel.value = String(existingDisc?.type ?? 0);
+    typeWrap.appendChild(typeSel);
+
+    const pctWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
+    pctWrap.appendChild(ui.createElementWithText('label', t('rest_discount_modal_percentage'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+    const pctIn = ui.createElement('input', ['search-input'], { type: 'number', value: existingDisc?.percentage ?? '', placeholder: '15', min: '1', max: '100' });
+    pctWrap.appendChild(pctIn);
+
+    const syncTypeVisibility = () => {
+        const isFree = typeSel.value === '1';
+        pctWrap.style.display = isFree ? 'none' : 'flex';
+    };
+    typeSel.addEventListener('change', syncTypeVisibility);
+    syncTypeVisibility();
+
+    const descWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
+    descWrap.appendChild(ui.createElementWithText('label', t('rest_discount_modal_desc'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+    const descIn = ui.createElement('input', ['search-input'], { type: 'text', value: existingDisc?.description || '', placeholder: isAr ? 'وصف...' : 'Description...' });
+    descWrap.appendChild(descIn);
+
+    const startWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
+    startWrap.appendChild(ui.createElementWithText('label', t('rest_discount_modal_start'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+    const startIn = ui.createElement('input', ['search-input'], { type: 'datetime-local', value: toLocalInput(defaultStartIso) });
+    startWrap.appendChild(startIn);
+
+    const endWrap = ui.createElement('div', [], { style: 'display: flex; flex-direction: column; gap: 0.35rem;' });
+    endWrap.appendChild(ui.createElementWithText('label', t('rest_discount_modal_end'), [], { style: 'font-weight: 600; font-size: 0.85rem;' }));
+    const endIn = ui.createElement('input', ['search-input'], { type: 'datetime-local', value: toLocalInput(defaultEndIso) });
+    endWrap.appendChild(endIn);
+
+    form.appendChild(nameWrap);
+    form.appendChild(typeWrap);
+    form.appendChild(pctWrap);
+    form.appendChild(descWrap);
+    form.appendChild(startWrap);
+    form.appendChild(endWrap);
+
+    ui.showModal(isEdit ? (isAr ? '✏️ تعديل الخصم / الكود' : '✏️ Edit Discount') : t('rest_discount_modal_add_title'), form, [
         {
             text: t('rest_discount_modal_save'),
             type: 'success',
             closeOnClick: false,
             onClick: async () => {
                 const name = nameIn.value.trim();
+                const type = parseInt(typeSel.value, 10) || 0;
+                const isFreeDelivery = type === 1;
                 const pctVal = pctIn.value.trim();
-                const description = descIn.value.trim() || name;
+                const description = descIn.value.trim() || (isFreeDelivery ? (isAr ? 'توصيل مجاني' : 'Free Delivery') : name);
                 const startDateVal = startIn.value;
                 const endDateVal = endIn.value;
 
                 let isValid = true;
                 if (!name) {
-                    ui.setInputInvalid(nameIn, getLanguage() === 'ar' ? 'الاسم مطلوب' : 'Name is required');
+                    ui.setInputInvalid(nameIn, isAr ? 'الاسم مطلوب' : 'Name is required');
                     isValid = false;
                 }
-                const percentage = parseFloat(pctVal);
-                if (!pctVal || isNaN(percentage) || percentage <= 0 || percentage > 100) {
-                    ui.setInputInvalid(pctIn, getLanguage() === 'ar' ? 'النسبة المئوية يجب أن تكون بين 1 و 100' : 'Percentage must be between 1 and 100');
+                const percentage = isFreeDelivery ? 100 : parseFloat(pctVal);
+                if (!isFreeDelivery && (!pctVal || isNaN(percentage) || percentage <= 0 || percentage > 100)) {
+                    ui.setInputInvalid(pctIn, isAr ? 'النسبة المئوية يجب أن تكون بين 1 و 100' : 'Percentage must be between 1 and 100');
                     isValid = false;
                 }
                 if (startDateVal && endDateVal && new Date(startDateVal) >= new Date(endDateVal)) {
-                    ui.setInputInvalid(endIn, getLanguage() === 'ar' ? 'تاريخ الانتهاء يجب أن يكون بعد تاريخ البدء' : 'End date must be after start date');
+                    ui.setInputInvalid(endIn, isAr ? 'تاريخ الانتهاء يجب أن يكون بعد تاريخ البدء' : 'End date must be after start date');
                     isValid = false;
                 }
 
@@ -2182,23 +2220,23 @@ function showAddDiscountModal(existingDisc = null) {
                     try {
                         await apiFetch('/api/v1/discounts', {
                             method: 'PUT',
-                            body: JSON.stringify({ id: existingDisc.id, name, description, percentage, type: 1, startDate, endDate })
+                            body: JSON.stringify({ id: existingDisc.id, name, description, percentage, type, startDate, endDate })
                         });
-                        ui.showToast(getLanguage() === 'ar' ? 'تم تعديل الخصم بنجاح' : 'Discount updated successfully', 'success');
+                        ui.showToast(isAr ? 'تم تعديل الخصم بنجاح' : 'Discount updated successfully', 'success');
                         await refreshDiscounts();
                         if (activeTab === 'discounts') renderActiveTab();
                     } catch (err) {
-                        ui.showToast((getLanguage() === 'ar' ? 'فشل تعديل الخصم: ' : 'Failed to update discount: ') + err.message, 'error');
+                        ui.showToast((isAr ? 'فشل تعديل الخصم: ' : 'Failed to update discount: ') + err.message, 'error');
                     }
                     return;
                 }
                 const tempId = 'temp-' + Date.now();
-                discounts.push({ id: tempId, name, description, percentage, type: 1, startDate, endDate, isActive: true });
+                discounts.push({ id: tempId, name, description, percentage, type, startDate, endDate, isActive: true });
                 ui.closeModal();
                 renderActiveTab();
                 try {
-                    const response = await apiFetch('/api/v1/discounts', { method: 'POST', body: JSON.stringify({ name, description, percentage, type: 1, startDate, endDate }) });
-                    ui.showToast(getLanguage() === 'ar' ? 'تمت إضافة الخصم بنجاح' : 'Discount created successfully', 'success');
+                    const response = await apiFetch('/api/v1/discounts', { method: 'POST', body: JSON.stringify({ name, description, percentage, type, startDate, endDate }) });
+                    ui.showToast(isAr ? 'تمت إضافة الخصم بنجاح' : 'Discount created successfully', 'success');
                     const idx = discounts.findIndex(d => d.id === tempId);
                     if (idx !== -1 && response.result?.id) discounts[idx].id = response.result.id;
                     await refreshDiscounts();
@@ -2207,7 +2245,7 @@ function showAddDiscountModal(existingDisc = null) {
                     console.error('Failed to create discount:', err);
                     discounts = discounts.filter(d => d.id !== tempId);
                     renderActiveTab();
-                    ui.showToast((getLanguage() === 'ar' ? 'فشل إضافة الخصم: ' : 'Failed to create discount: ') + err.message, 'error');
+                    ui.showToast((isAr ? 'فشل إضافة الخصم: ' : 'Failed to create discount: ') + err.message, 'error');
                 }
             }
         },
